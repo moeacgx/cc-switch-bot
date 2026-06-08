@@ -1,0 +1,15 @@
+name = "cc-switch-bot"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+account_id = "7fd560a7090967ba15434f96a9e2a775"
+
+# Cloudflare D1 database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "cc-switch-bot-db"
+database_id = "1c646e20-9d21-4065-ac16-242cd1f2054a"
+
+# Environment variables (secrets set via `wrangler secret put`)
+# BOT_TOKEN        - Telegram Bot Token (from @BotFather)
+# ENCRYPTION_KEY   - 32-char hex key for AES encryption of API keys
+# ADMIN_USER_ID    - (optional) Telegram user ID for admin-only access

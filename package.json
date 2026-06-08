@@ -1,0 +1,18 @@
+{
+  "name": "cc-switch-bot",
+  "version": "1.0.0",
+  "description": "Telegram Bot for managing Claude Code / Codex / Gemini provider switching, deployed on Cloudflare Workers",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute cc-switch-bot-db --local --file=schema.sql",
+    "db:init:remote": "wrangler d1 execute cc-switch-bot-db --remote --file=schema.sql",
+    "webhook:set": "node scripts/set-webhook.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250514.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.19.1"
+  }
+}
