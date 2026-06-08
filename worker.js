@@ -24,7 +24,7 @@ function genId(name) { const s = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').
 
 // ========================== DB Schema ==========================
 const DB_SCHEMA = `
-CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, app_type TEXT NOT NULL DEFAULT 'claude', base_url TEXT NOT NULL, api_key_encrypted TEXT NOT NULL, model TEXT, models_json TEXT, api_format TEXT NOT NULL DEFAULT 'anthropic', is_current INTEGER NOT NULL DEFAULT 0, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, app_type TEXT NOT NULL DEFAULT 'claude', base_url TEXT NOT NULL, api_key_encrypted TEXT NOT NULL, model TEXT, models_json TEXT, api_format TEXT NOT NULL DEFAULT 'anthropic', is_current INTEGER NOT NULL DEFAULT 0, priority INTEGER NOT NULL DEFAULT 0, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_prov_user ON providers(user_id);
 CREATE INDEX IF NOT EXISTS idx_prov_cur ON providers(user_id, app_type, is_current);
 CREATE TABLE IF NOT EXISTS usage_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, provider_id TEXT, provider_name TEXT, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, recorded_at INTEGER NOT NULL);
@@ -39,10 +39,26 @@ CREATE TABLE IF NOT EXISTS config_overrides (user_id TEXT NOT NULL, app_type TEX
 const now = () => Date.now();
 async function dbSettings(db, uid) { return db.prepare('SELECT * FROM settings WHERE user_id=?').bind(uid).first(); }
 async function dbUpsertSettings(db, uid, tok) { await db.prepare('INSERT INTO settings(user_id,api_token,allowed,created_at) VALUES(?,?,1,?) ON CONFLICT(user_id) DO UPDATE SET api_token=excluded.api_token').bind(uid, tok, now()).run(); }
-async function dbProviders(db, uid, app) { const q = app ? db.prepare('SELECT * FROM providers WHERE user_id=? AND app_type=? ORDER BY created_at').bind(uid, app) : db.prepare('SELECT * FROM providers WHERE user_id=? ORDER BY app_type,created_at').bind(uid); return (await q.all()).results; }
+async function dbProviders(db, uid, app) { const q = app ? db.prepare('SELECT * FROM providers WHERE user_id=? AND app_type=? ORDER BY priority, created_at').bind(uid, app) : db.prepare('SELECT * FROM providers WHERE user_id=? ORDER BY app_type, priority, created_at').bind(uid); return (await q.all()).results; }
 async function dbProvider(db, uid, id) { return db.prepare('SELECT * FROM providers WHERE id=? AND user_id=?').bind(id, uid).first(); }
 async function dbCurrent(db, uid, app) { return db.prepare('SELECT * FROM providers WHERE user_id=? AND app_type=? AND is_current=1 LIMIT 1').bind(uid, app).first(); }
-async function dbInsertProv(db, p) { const n = now(); await db.prepare('INSERT INTO providers(id,user_id,name,app_type,base_url,api_key_encrypted,model,models_json,api_format,is_current,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(p.id,p.user_id,p.name,p.app_type,p.base_url,p.api_key_encrypted,p.model,p.models_json||null,p.api_format,p.is_current,p.notes,n,n).run(); }
+async function dbInsertProv(db, p) { const n = now(); const maxP = await db.prepare('SELECT COALESCE(MAX(priority),0) as mp FROM providers WHERE user_id=? AND app_type=?').bind(p.user_id, p.app_type).first(); const priority = (maxP?.mp || 0) + 1; await db.prepare('INSERT INTO providers(id,user_id,name,app_type,base_url,api_key_encrypted,model,models_json,api_format,is_current,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(p.id,p.user_id,p.name,p.app_type,p.base_url,p.api_key_encrypted,p.model,p.models_json||null,p.api_format,p.is_current,priority,p.notes,n,n).run(); }
+async function dbReorderProv(db, uid, id, direction) {
+  const p = await dbProvider(db, uid, id);
+  if (!p) return false;
+  const op = direction === 'up' ? '<' : '>';
+  const order = direction === 'up' ? 'DESC' : 'ASC';
+  const neighbor = await db.prepare(
+    `SELECT id, priority FROM providers WHERE user_id=? AND app_type=? AND priority ${op} ? ORDER BY priority ${order} LIMIT 1`
+  ).bind(uid, p.app_type, p.priority).first();
+  if (!neighbor) return false;
+  const n = Date.now();
+  await db.batch([
+    db.prepare('UPDATE providers SET priority=?,updated_at=? WHERE id=?').bind(neighbor.priority, n, id),
+    db.prepare('UPDATE providers SET priority=?,updated_at=? WHERE id=?').bind(p.priority, n, neighbor.id),
+  ]);
+  return true;
+}
 async function dbUpdateProvModels(db, uid, id, modelsJson) { await db.prepare('UPDATE providers SET models_json=?,updated_at=? WHERE id=? AND user_id=?').bind(modelsJson, now(), id, uid).run(); }
 async function dbUpdateProvModel(db, uid, id, model) { await db.prepare('UPDATE providers SET model=?,updated_at=? WHERE id=? AND user_id=?').bind(model, now(), id, uid).run(); }
 async function dbDeleteProv(db, uid, id) { return (await db.prepare('DELETE FROM providers WHERE id=? AND user_id=?').bind(id, uid).run()).meta.changes > 0; }
@@ -188,7 +204,8 @@ function providerListKb(ps) {
   for (const p of ps) {
     const icon = APP_ICONS[p.app_type] || '⚪';
     const cur = p.is_current ? ' ✅' : '';
-    rows.push([btn(`${icon} ${p.name}${cur}`, `pinfo:${p.id}`)]);
+    const pri = p.priority ? `[${p.priority}] ` : '';
+    rows.push([btn(`${icon} ${pri}${p.name}${cur}`, `pinfo:${p.id}`)]);
   }
   return kb(rows);
 }
@@ -205,6 +222,7 @@ function providerActionKb(id, appType, hasModels) {
       rows[1].push(btn('🔀 切换模型', `chmodel:${id}`));
     }
   }
+  rows.push([btn('⬆️ 上移', `pup:${id}`), btn('⬇️ 下移', `pdown:${id}`)]);
   rows.push([btn('🗑 删除', `delc:${id}`)]);
   return kb(rows);
 }
@@ -363,6 +381,7 @@ async function showProviderInfo(env, uid, id) {
   const cur = p.is_current ? '✅ *当前使用中*\n' : '';
   const models = p.models_json ? JSON.parse(p.models_json) : [];
   const modelsText = models.length > 0 ? `\n📦 可用模型: *${models.length}* 个` : '';
+  const priText = `\n🔢 优先级: *${p.priority || 0}*`;
 
   let modelInfo;
   if (p.app_type === 'claude') {
@@ -377,7 +396,7 @@ async function showProviderInfo(env, uid, id) {
     `${cur}` +
     `📱 应用: ${p.app_type}\n` +
     `🌐 地址: \`${p.base_url}\`\n` +
-    `${modelInfo}${modelsText}\n` +
+    `${modelInfo}${modelsText}${priText}\n` +
     `🆔 ID: \`${p.id}\``,
     providerActionKb(id, p.app_type, models.length > 0)
   );
@@ -751,6 +770,8 @@ async function handleCallback(env, uid, data) {
 
   // Provider
   if (action === 'pinfo') return await showProviderInfo(env, uid, param);
+  if (action === 'pup') { await dbReorderProv(env.DB, uid, param, 'up'); return await showProviderInfo(env, uid, param); }
+  if (action === 'pdown') { await dbReorderProv(env.DB, uid, param, 'down'); return await showProviderInfo(env, uid, param); }
   if (action === 'switch') return await doSwitch(env, uid, param);
   if (action === 'test') return await showTest(env, uid, param);
   if (action === 'models') return await startModelsFetch(env, uid, param);
@@ -841,6 +862,50 @@ async function handleMessage(env, uid, text, firstName) {
   };
 }
 
+// ========================== Failover Check ==========================
+
+async function performFailoverCheck(env, uid) {
+  const results = [];
+  for (const app of ALL_APPS) {
+    const current = await dbCurrent(env.DB, uid, app);
+    if (!current) continue;
+
+    // Quick health check on current provider
+    const health = await checkProv(env.DB, env.ENCRYPTION_KEY, uid, current.id);
+    if (health.status !== 'failed') {
+      results.push({ app, status: 'ok', provider: current.name });
+      continue;
+    }
+
+    // Current failed — find next provider by priority
+    const all = await dbProviders(env.DB, uid, app);
+    // Sort by priority
+    all.sort((a, b) => a.priority - b.priority);
+
+    let switched = false;
+    for (const p of all) {
+      if (p.id === current.id) continue;
+      const h = await checkProv(env.DB, env.ENCRYPTION_KEY, uid, p.id);
+      if (h.status !== 'failed') {
+        await dbSwitch(env.DB, uid, p.id);
+        results.push({ app, status: 'failover', from: current.name, to: p.name, latency: h.ms });
+        // Notify via Telegram
+        const icon = APP_ICONS[app] || '⚪';
+        await tgSend(env.BOT_TOKEN, uid, md(
+          `⚠️ *自动降级*\n\n${icon} *${app}*\n❌ ${current.name} 不可用\n✅ 已切换到 *${p.name}*${h.ms ? ' ('+h.ms+'ms)' : ''}`
+        ));
+        switched = true;
+        break;
+      }
+    }
+    if (!switched) {
+      results.push({ app, status: 'all_failed', provider: current.name });
+      await tgSend(env.BOT_TOKEN, uid, md(`🔴 *${app} 所有供应商均不可用！*`));
+    }
+  }
+  return results;
+}
+
 // ========================== REST API ==========================
 
 async function handleApi(req, env, path) {
@@ -865,6 +930,10 @@ async function handleApi(req, env, path) {
     const app = url.searchParams.get('app');
     const skills = app ? await dbSkillsForApp(env.DB, uid, app) : await dbSkills(env.DB, uid);
     return json({ skills: skills.map(s => ({ id: s.id, name: s.name, content: s.content, enabled_apps: JSON.parse(s.enabled_apps || '[]') })) });
+  }
+  if (path === '/api/failover-check' && req.method === 'POST') {
+    const results = await performFailoverCheck(env, uid);
+    return json({ results });
   }
   return json({ error: 'Not found' }, 404);
 }
@@ -905,6 +974,8 @@ gemini) [ -d ~/.gemini ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/
 openclaw) [ -d ~/.openclaw ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=openclaw&format=raw") && aw ~/.openclaw/openclaw.json "\$c"; } || true;;
 hermes) [ -d ~/.hermes ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=hermes&format=raw") && aw ~/.hermes/config.yaml "\$c"; } || true;;
 esac; done
+# Failover check
+curl -sf -X POST -H "$A" "${CC_SWITCH_BOT_API}/api/failover-check" >/dev/null 2>&1 || true
 # Sync skills per app
 for app in \${CC_SWITCH_BOT_APPS:-claude}; do
   case "\$app" in
