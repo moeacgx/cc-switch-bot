@@ -759,7 +759,7 @@ async function showSysInfo(env, uid, origin) {
   const skillCount = (await dbSkills(env.DB, uid)).length;
 
   const installCmd = `curl -fsSL ${origin}/install.sh | bash`;
-  const silentCmd = `CC_SWITCH_BOT_TOKEN=${token} CC_SWITCH_BOT_APPS="claude" \\\n  curl -fsSL ${origin}/install.sh | bash`;
+  const silentCmd = `export CC_SWITCH_BOT_TOKEN=${token} CC_SWITCH_BOT_APPS="claude"\ncurl -fsSL ${origin}/install.sh | bash`;
 
   return md(
     `ℹ️ *系统信息*\n\n` +

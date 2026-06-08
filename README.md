@@ -285,8 +285,8 @@ curl -fsSL https://你的worker.workers.dev/install.sh | bash
 支持静默安装：
 
 ```bash
-CC_SWITCH_BOT_TOKEN=xxx CC_SWITCH_BOT_APPS="claude codex openclaw hermes" \
-  curl -fsSL https://你的worker.workers.dev/install.sh | bash
+export CC_SWITCH_BOT_TOKEN=xxx CC_SWITCH_BOT_APPS="claude codex openclaw hermes"
+curl -fsSL https://你的worker.workers.dev/install.sh | bash
 ```
 
 ### 同步流程
