@@ -1,5 +1,5 @@
 name = "cc-switch-bot"
-main = "src/index.ts"
+main = "worker.js"
 compatibility_date = "2025-06-01"
 account_id = "7fd560a7090967ba15434f96a9e2a775"
 
