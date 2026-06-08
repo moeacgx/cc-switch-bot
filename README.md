@@ -8,6 +8,9 @@
 
 基于 [cc-switch-cli](https://github.com/SaladDay/cc-switch-cli) 核心功能精简重写。
 
+[![Telegram 站长仓库](https://img.shields.io/badge/Telegram-站长仓库-blue?logo=telegram)](https://t.me/zhanzhangck)
+[![Telegram NexHub AI社区](https://img.shields.io/badge/Telegram-NexHub_AI社区-blue?logo=telegram)](https://t.me/vpsbbq)
+
 </div>
 
 ---
