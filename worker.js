@@ -590,19 +590,20 @@ async function showPromptDetail(env, uid, app) {
   const file = PROMPT_FILES[app];
   const p = await dbGetPrompt(env.DB, uid, app);
 
+  // Auto-set convo so user can directly send text/file
+  await setConvo(env.DB, uid, 'prompt_upload', { app });
+
   if (!p) {
     return md(
-      `${icon} *${app}* 提示词 (\`${file}\`)\n\n_未设置_\n\n发送文本或 .md 文件来设置`,
-      kb([[btn('📤 上传提示词', `promptup:${app}`)]])
+      `${icon} *${app}* 提示词 (\`${file}\`)\n\n_未设置_\n\n直接发送文本或 .md 文件即可设置`,
     );
   }
 
   const preview = p.content.length > 1500 ? p.content.slice(0, 1500) + '\n...' : p.content;
   return md(
-    `${icon} *${app}* 提示词 (\`${file}\`)\n\n📏 ${p.content.length} 字符\n\n\`\`\`\n${preview}\n\`\`\``,
+    `${icon} *${app}* 提示词 (\`${file}\`)\n\n📏 ${p.content.length} 字符\n\n\`\`\`\n${preview}\n\`\`\`\n\n_直接发送文本或 .md 文件替换_`,
     kb([
-      [btn('📥 下载', `promptdl:${app}`), btn('📤 替换', `promptup:${app}`)],
-      [btn('🗑 清除', `promptrm:${app}`)],
+      [btn('📥 下载', `promptdl:${app}`), btn('🗑 清除', `promptrm:${app}`)],
     ])
   );
 }
@@ -877,9 +878,8 @@ async function handleCallback(env, uid, data) {
 
   // Prompts
   if (action === 'prompt') return await showPromptDetail(env, uid, param);
-  if (action === 'promptup') { await setConvo(env.DB, uid, 'prompt_upload', { app: param }); return md(`📤 *上传 ${param} 提示词*\n\n发送 Markdown 文本或 .md 文件\n\n_将同步为 \`${PROMPT_FILES[param]}\`_`, cancelKb()); }
   if (action === 'promptdl') return { _action: 'sendPromptFile', app: param };
-  if (action === 'promptrm') { await dbDeletePrompt(env.DB, uid, param); return md(`✅ *${param}* 提示词已清除`); }
+  if (action === 'promptrm') { await dbDeletePrompt(env.DB, uid, param); await clearConvo(env.DB, uid); return md(`✅ *${param}* 提示词已清除`); }
   if (action === 'skinfo') return await showSkillInfo(env, uid, param);
   if (action === 'skview') return await showSkillContent(env, uid, param);
   if (action === 'sktoggle') { const [sid, app] = param.split(':'); return await handleSkillToggle(env, uid, sid, app); }
