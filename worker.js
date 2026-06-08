@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS settings (user_id TEXT PRIMARY KEY, api_token TEXT NO
 CREATE TABLE IF NOT EXISTS conversations (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, enabled_apps TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id);
-CREATE TABLE IF NOT EXISTS config_overrides (user_id TEXT NOT NULL, app_type TEXT NOT NULL, content TEXT NOT NULL, filename TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, app_type));`;
+CREATE TABLE IF NOT EXISTS config_overrides (user_id TEXT NOT NULL, app_type TEXT NOT NULL, content TEXT NOT NULL, filename TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, app_type));
+CREATE TABLE IF NOT EXISTS prompts (user_id TEXT NOT NULL, app_type TEXT NOT NULL, content TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, app_type));`;
 
 // ========================== DB Helpers ==========================
 const now = () => Date.now();
@@ -84,6 +85,14 @@ async function dbSkillsForApp(db, uid, app) { return (await db.prepare("SELECT *
 async function dbGetOverride(db, uid, app) { return db.prepare('SELECT * FROM config_overrides WHERE user_id=? AND app_type=?').bind(uid, app).first(); }
 async function dbSetOverride(db, uid, app, content, filename) { await db.prepare('INSERT INTO config_overrides(user_id,app_type,content,filename,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,app_type) DO UPDATE SET content=excluded.content,filename=excluded.filename,updated_at=excluded.updated_at').bind(uid, app, content, filename, now()).run(); }
 async function dbDeleteOverride(db, uid, app) { await db.prepare('DELETE FROM config_overrides WHERE user_id=? AND app_type=?').bind(uid, app).run(); }
+
+// -- Prompts (global CLAUDE.md / AGENTS.md / GEMINI.md) --
+async function dbGetPrompt(db, uid, app) { return db.prepare('SELECT * FROM prompts WHERE user_id=? AND app_type=?').bind(uid, app).first(); }
+async function dbSetPrompt(db, uid, app, content) { await db.prepare('INSERT INTO prompts(user_id,app_type,content,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id,app_type) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at').bind(uid, app, content, now()).run(); }
+async function dbDeletePrompt(db, uid, app) { await db.prepare('DELETE FROM prompts WHERE user_id=? AND app_type=?').bind(uid, app).run(); }
+
+const PROMPT_FILES = { claude: 'CLAUDE.md', codex: 'AGENTS.md', gemini: 'GEMINI.md', openclaw: 'AGENTS.md', hermes: 'AGENTS.md' };
+const PROMPT_DIRS = { claude: '~/.claude', codex: '~/.codex', gemini: '~/.gemini', openclaw: '~/.openclaw', hermes: '~/.hermes' };
 
 // ========================== Config Gen ==========================
 const ALL_APPS = ['claude', 'codex', 'gemini', 'openclaw', 'hermes'];
@@ -171,8 +180,9 @@ function replyKb() {
       ['➕ 添加供应商', '📋 供应商列表'],
       ['🔄 切换供应商', '✅ 当前状态'],
       ['🔍 连通性测试', '📄 查看配置'],
-      ['🧩 Skills管理', '📊 用量统计'],
-      ['🔑 API Token', 'ℹ️ 系统信息'],
+      ['📝 提示词', '🧩 Skills管理'],
+      ['📊 用量统计', '🔑 API Token'],
+      ['ℹ️ 系统信息'],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -187,6 +197,7 @@ const REPLY_KB_MAP = {
   '✅ 当前状态':   'current',
   '🔍 连通性测试': 'test',
   '📄 查看配置':   'config',
+  '📝 提示词':     'prompts',
   '🧩 Skills管理': 'skills',
   '📊 用量统计':   'stats',
   '🔑 API Token': 'token',
@@ -559,6 +570,53 @@ async function handleSetSlot(env, uid, provId, slot, modelIdx) {
   );
 }
 
+// ========================== Prompts Management ==========================
+
+async function showPrompts(env, uid) {
+  let t = '📝 *全局提示词*\n\n';
+  for (const app of ALL_APPS) {
+    const icon = APP_ICONS[app] || '⚪';
+    const p = await dbGetPrompt(env.DB, uid, app);
+    const file = PROMPT_FILES[app];
+    const status = p ? `✅ ${p.content.length} 字符` : '⬜ 未设置';
+    t += `${icon} *${app}* → \`${file}\`\n   ${status}\n`;
+  }
+  t += '\n_选择应用查看/编辑提示词_';
+  return md(t, appTypeKb('prompt'));
+}
+
+async function showPromptDetail(env, uid, app) {
+  const icon = APP_ICONS[app] || '⚪';
+  const file = PROMPT_FILES[app];
+  const p = await dbGetPrompt(env.DB, uid, app);
+
+  if (!p) {
+    return md(
+      `${icon} *${app}* 提示词 (\`${file}\`)\n\n_未设置_\n\n发送文本或 .md 文件来设置`,
+      kb([[btn('📤 上传提示词', `promptup:${app}`)]])
+    );
+  }
+
+  const preview = p.content.length > 1500 ? p.content.slice(0, 1500) + '\n...' : p.content;
+  return md(
+    `${icon} *${app}* 提示词 (\`${file}\`)\n\n📏 ${p.content.length} 字符\n\n\`\`\`\n${preview}\n\`\`\``,
+    kb([
+      [btn('📥 下载', `promptdl:${app}`), btn('📤 替换', `promptup:${app}`)],
+      [btn('🗑 清除', `promptrm:${app}`)],
+    ])
+  );
+}
+
+async function handlePromptUploadText(env, uid, text) {
+  const convo = await getConvo(env.DB, uid);
+  if (!convo || convo.state !== 'prompt_upload') return null;
+  const app = convo.data.app;
+  await dbSetPrompt(env.DB, uid, app, text);
+  await clearConvo(env.DB, uid);
+  const icon = APP_ICONS[app] || '⚪';
+  return md(`✅ *${app} 提示词已保存！*\n\n${icon} \`${PROMPT_FILES[app]}\`\n📏 ${text.length} 字符\n\n_sync agent 下次同步时生效_`);
+}
+
 // ========================== Skills Management ==========================
 
 function skillListKb(skills) {
@@ -816,6 +874,12 @@ async function handleCallback(env, uid, data) {
 
   // Skills
   if (action === 'skadd') return await startSkillAdd(env, uid);
+
+  // Prompts
+  if (action === 'prompt') return await showPromptDetail(env, uid, param);
+  if (action === 'promptup') { await setConvo(env.DB, uid, 'prompt_upload', { app: param }); return md(`📤 *上传 ${param} 提示词*\n\n发送 Markdown 文本或 .md 文件\n\n_将同步为 \`${PROMPT_FILES[param]}\`_`, cancelKb()); }
+  if (action === 'promptdl') return { _action: 'sendPromptFile', app: param };
+  if (action === 'promptrm') { await dbDeletePrompt(env.DB, uid, param); return md(`✅ *${param}* 提示词已清除`); }
   if (action === 'skinfo') return await showSkillInfo(env, uid, param);
   if (action === 'skview') return await showSkillContent(env, uid, param);
   if (action === 'sktoggle') { const [sid, app] = param.split(':'); return await handleSkillToggle(env, uid, sid, app); }
@@ -839,20 +903,20 @@ async function handleCallback(env, uid, data) {
 async function handleMessage(env, uid, text, firstName, origin) {
   // 1. Check ongoing conversation flows
   const convo = await getConvo(env.DB, uid);
-  if (convo && (convo.state.startsWith('add_') || convo.state.startsWith('skill_') || convo.state === 'cfg_upload')) {
+  if (convo && (convo.state.startsWith('add_') || convo.state.startsWith('skill_') || convo.state === 'cfg_upload' || convo.state === 'prompt_upload')) {
     if (REPLY_KB_MAP[text]) {
       await clearConvo(env.DB, uid);
     } else {
       if (convo.state.startsWith('add_')) { const r = await handleAddText(env, uid, text); if (r) return r; }
       if (convo.state.startsWith('skill_')) { const r = await handleSkillAddText(env, uid, text); if (r) return r; }
       if (convo.state === 'cfg_upload') {
-        // User sent text as config content
         const app = convo.data.app;
         const fnMap = { claude: 'settings.json', codex: 'config.toml', gemini: '.env', openclaw: 'openclaw.json', hermes: 'config.yaml' };
         await dbSetOverride(env.DB, uid, app, text, fnMap[app] || 'config');
         await clearConvo(env.DB, uid);
         return md(`✅ *${app} 配置已上传！*\n\n📏 ${text.length} 字符\n_sync agent 下次同步时生效_`);
       }
+      if (convo.state === 'prompt_upload') { const r = await handlePromptUploadText(env, uid, text); if (r) return r; }
     }
   }
 
@@ -868,6 +932,7 @@ async function handleMessage(env, uid, text, firstName, origin) {
       case 'current': return await showCurrent(env, uid);
       case 'test':    return await showTest(env, uid, null);
       case 'config':  return await showConfig(env, uid, null);
+      case 'prompts': return await showPrompts(env, uid);
       case 'skills':  return await showSkills(env, uid);
       case 'stats':   return await showStats(env, uid, null);
       case 'token':   return await showToken(env, uid);
@@ -963,6 +1028,13 @@ async function handleApi(req, env, path) {
     const skills = app ? await dbSkillsForApp(env.DB, uid, app) : await dbSkills(env.DB, uid);
     return json({ skills: skills.map(s => ({ id: s.id, name: s.name, content: s.content, enabled_apps: JSON.parse(s.enabled_apps || '[]') })) });
   }
+  if (path === '/api/prompt') {
+    const app = url.searchParams.get('app') || 'claude';
+    const p = await dbGetPrompt(env.DB, uid, app);
+    if (!p) return json({ content: null });
+    if (url.searchParams.get('format') === 'raw') return new Response(p.content, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+    return json({ app, filename: PROMPT_FILES[app], content: p.content });
+  }
   if (path === '/api/failover-check' && req.method === 'POST') {
     const results = await performFailoverCheck(env, uid);
     return json({ results });
@@ -1008,6 +1080,14 @@ hermes) if [ -d ~/.hermes ]; then c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/
 esac; done
 # Failover check
 curl -sf -X POST -H "\$A" "\${CC_SWITCH_BOT_API}/api/failover-check" >/dev/null 2>&1 || true
+# Sync prompts (CLAUDE.md / AGENTS.md / GEMINI.md)
+for app in \${CC_SWITCH_BOT_APPS:-claude}; do
+  case "\$app" in
+    claude) pf=~/.claude/CLAUDE.md;; codex) pf="\${CODEX_HOME:-~/.codex}/AGENTS.md";; gemini) pf=~/.gemini/GEMINI.md;; openclaw) pf=~/.openclaw/AGENTS.md;; hermes) pf=~/.hermes/AGENTS.md;; *) continue;; esac
+  c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/prompt?app=\$app&format=raw" 2>/dev/null) || continue
+  [ -n "\$c" ] && [ "\$c" != "null" ] && { aw "\$pf" "\$c"
+    if [ "\$app" = "hermes" ] && [ -d ~/.hermes/profiles ]; then for pd in ~/.hermes/profiles/*/; do [ -d "\$pd" ] && aw "\${pd}AGENTS.md" "\$c"; done; fi; }
+done
 # Sync skills per app
 for app in \${CC_SWITCH_BOT_APPS:-claude}; do
   case "\$app" in
@@ -1083,6 +1163,13 @@ export default {
             } else {
               await tgSend(env.BOT_TOKEN, cid, { text: '❌ 暂无配置' });
             }
+          } else if (reply && reply._action === 'sendPromptFile') {
+            const p = await dbGetPrompt(env.DB, uid, reply.app);
+            if (p) {
+              await tgSendFile(env.BOT_TOKEN, cid, p.content, PROMPT_FILES[reply.app], `📝 ${reply.app} ${PROMPT_FILES[reply.app]}`);
+            } else {
+              await tgSend(env.BOT_TOKEN, cid, { text: '❌ 暂无提示词' });
+            }
           } else if (reply) {
             await tgEdit(env.BOT_TOKEN, cid, u.callback_query.message.message_id, reply);
           }
@@ -1113,6 +1200,16 @@ export default {
               await dbInsertSkill(env.DB, { id, user_id: uid, name: d.name, content, enabled_apps: [] });
               await clearConvo(env.DB, uid);
               await tgSend(env.BOT_TOKEN, cid, md(`✅ *Skill 已添加！*\n\n🧩 *${d.name}*\n📏 ${content.length} 字符`));
+            } else {
+              await tgSend(env.BOT_TOKEN, cid, { text: '❌ 无法读取文件' });
+            }
+          } else if (convo?.state === 'prompt_upload') {
+            const content = await tgGetFile(env.BOT_TOKEN, u.message.document.file_id);
+            if (content) {
+              const app = convo.data.app;
+              await dbSetPrompt(env.DB, uid, app, content);
+              await clearConvo(env.DB, uid);
+              await tgSend(env.BOT_TOKEN, cid, md(`✅ *${app} 提示词已保存！*\n\n📝 \`${PROMPT_FILES[app]}\`\n📏 ${content.length} 字符`));
             } else {
               await tgSend(env.BOT_TOKEN, cid, { text: '❌ 无法读取文件' });
             }
