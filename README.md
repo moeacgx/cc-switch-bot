@@ -1,126 +1,274 @@
-# CC-Switch Bot
+<div align="center">
 
-Telegram Bot + Cloudflare Worker 精简版，用于远程管理 Claude Code / Codex / Gemini 供应商配置。
+# 🤖 CC-Switch Bot
 
-基于 [cc-switch-cli](https://github.com/SaladDay/cc-switch-cli) 的核心功能精简重写。
+**Telegram Bot 远程管理 Claude Code / Codex / Gemini 供应商配置**
 
-## 架构
+一个 Cloudflare Worker 单文件部署的 Telegram Bot，在手机上一键切换 API 供应商，所有服务器自动同步。
+
+基于 [cc-switch-cli](https://github.com/SaladDay/cc-switch-cli) 核心功能精简重写。
+
+</div>
+
+---
+
+## 它能做什么
 
 ```
-Telegram App  ←→  CF Worker (Bot + REST API)  ←→  CF D1 (SQLite)
-                         ↑
-                  本地 sync.sh (定时拉取配置)
+你的手机 Telegram          CF Worker (后端)           你的服务器们
+      │                        │                     ┌──── 服务器A
+      │  点 🔄 切换供应商       │                     │
+      │ ─────────────────────> │  写入 D1 数据库      ├──── 服务器B
+      │                        │                     │
+      │                        │  ← 每分钟 cron 拉取  ├──── 服务器C
+      │                        │     sync.sh          │
+      │                        │ ──────────────────> 自动覆盖 settings.json
+      │                        │
+      │                 Claude Code 下次启动就用新供应商
 ```
 
-## 快速开始
+**在手机上切换，所有服务器 1 分钟内自动生效。**
 
-### 1. 准备
+---
 
-- 一个 Cloudflare 账号
-- 从 [@BotFather](https://t.me/BotFather) 创建一个 Telegram Bot，获取 `BOT_TOKEN`
-- 安装 [wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
+## 功能预览
 
-### 2. 部署
+### 📱 常驻底部键盘
+
+发送 `/start` 后，输入框下方会出现 8 个常驻按钮，所有操作点点点完成：
+
+```
+╔═══════════════╦═══════════════╗
+║ ➕ 添加供应商  ║ 📋 供应商列表  ║
+╠═══════════════╬═══════════════╣
+║ 🔄 切换供应商  ║ ✅ 当前状态   ║
+╠═══════════════╬═══════════════╣
+║ 🔍 连通性测试  ║ 📄 查看配置   ║
+╠═══════════════╬═══════════════╣
+║ 📊 用量统计   ║ 🔑 API Token  ║
+╚═══════════════╩═══════════════╝
+```
+
+### ➕ 添加供应商（分步引导）
+
+全程交互式，不用记任何命令格式：
+
+```
+点 ➕ 添加供应商
+  ↓
+🔸 第 1/4 步：选应用类型
+  [🟣 Claude] [🟢 Codex] [🔵 Gemini]
+  ↓
+🔸 第 2/4 步：输入名称  → 你打字，例: "猫佬API"
+  ↓
+🔸 第 3/4 步：输入 URL   → https://maolaoapi.com/
+  ↓
+🔸 第 4/4 步：输入 Key   → sk-xxx (加密存储)
+  ↓
+🔄 自动拉取模型列表...
+  ↓
+🔸 发现 15 个模型，多选要添加的：
+  [⬜ claude-sonnet-4]     [⬜ claude-opus-4]
+  [⬜ claude-haiku-4]      [⬜ claude-3.5-sonnet]
+  [🔘 全选]  [✅ 确认选择 (3)]
+  [⏭ 跳过 (使用默认模型)]
+  ↓
+✅ 已添加 3 个供应商！
+```
+
+### 📥 获取模型列表（已有供应商）
+
+在供应商详情页点 **📥 获取模型**，随时从 API 拉取可用模型并批量添加：
+
+```
+🟣 猫佬API
+
+✅ 当前使用中
+📱 应用: claude
+🌐 地址: https://maolaoapi.com/
+🤖 模型: 默认
+🆔 ID: api-25064c
+
+[🔄 切换到此] [🔍 测试连通]
+[📥 获取模型] [🗑 删除]
+```
+
+点 📥 获取模型 →
+
+```
+📥 猫佬API 模型列表
+
+发现 15 个模型
+选择要批量添加为独立供应商的模型
+
+[⬜ claude-sonnet-4]     [⬜ claude-opus-4]
+[⬜ claude-haiku-4]      [⬜ claude-3.5-sonnet]
+[⬜ gpt-4.1]             [⬜ gpt-4o]
+...
+[🔘 全选]  [✅ 批量添加 (0)]
+```
+
+### 🔍 连通性测试
+
+自动测试所有活跃供应商的流式 API 响应延迟：
+
+```
+🔍 连通性测试
+
+🟢 猫佬API [claude]  326ms
+🟢 Codex官方 [codex]  891ms
+🟡 Gemini中转 [gemini]  7200ms (降级)
+```
+
+判定标准：🟢 ≤6s 正常 / 🟡 >6s 降级 / 🔴 超时或失败
+
+### 📄 查看配置
+
+生成与 cc-switch-cli 完全兼容的配置文件预览：
+
+```
+📄 claude (settings.json)
+
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-xxx",
+    "ANTHROPIC_BASE_URL": "https://maolaoapi.com/"
+  }
+}
+```
+
+---
+
+## 部署
+
+### 方式一：单文件粘贴（推荐）
+
+**零命令行，全在浏览器完成：**
+
+1. 复制 [`worker.js`](worker.js) 全部内容
+2. 打开 [Cloudflare Dashboard](https://dash.cloudflare.com/) → Workers → 创建 Worker → 粘贴代码
+3. **Settings → Variables** 添加：
+
+   | 变量名 | 值 | 说明 |
+   |--------|-----|------|
+   | `BOT_TOKEN` | `123456:ABC...` | 从 [@BotFather](https://t.me/BotFather) 获取 |
+   | `ENCRYPTION_KEY` | 任意 32 位字符串 | 用于加密 API Key |
+   | `ADMIN_USER_ID` | 你的 Telegram 数字 ID | (可选) 限制只有你能用 |
+
+4. **Settings → D1 Database Bindings** → 变量名填 `DB` → 选择你创建的 D1 数据库
+5. 浏览器访问 `https://你的worker.workers.dev/init-db` → 自动建表
+6. 浏览器访问 `https://你的worker.workers.dev/setup` → 注册 Webhook
+
+> **D1 建库：** Workers & Pages → D1 → Create database → 取个名就行
+
+### 方式二：Wrangler CLI
 
 ```bash
-# 安装依赖
+git clone https://github.com/moeacgx/cc-switch-bot.git
+cd cc-switch-bot
 npm install
 
-# 创建 D1 数据库
+# 创建 D1
 wrangler d1 create cc-switch-bot-db
-# 将返回的 database_id 填入 wrangler.toml
+# 把返回的 database_id 填入 wrangler.toml
 
-# 初始化数据库表
+# 建表
 wrangler d1 execute cc-switch-bot-db --remote --file=schema.sql
 
 # 设置 secrets
-wrangler secret put BOT_TOKEN          # 粘贴你的 Telegram Bot Token
-wrangler secret put ENCRYPTION_KEY     # 随机 32 位字符串，用于加密 API Key
-# (可选) 限制只允许你的 Telegram ID 使用
-wrangler secret put ADMIN_USER_ID      # 你的 Telegram user ID
+wrangler secret put BOT_TOKEN
+wrangler secret put ENCRYPTION_KEY
+wrangler secret put ADMIN_USER_ID  # 可选
 
 # 部署
 wrangler deploy
 
-# 注册 Telegram Webhook（两种方式任选）
-# 方式1: 浏览器访问 https://your-worker.workers.dev/setup
-# 方式2: 命令行
-BOT_TOKEN=xxx WORKER_URL=https://your-worker.workers.dev node scripts/set-webhook.mjs
+# 注册 Webhook
+# 浏览器访问 https://你的worker.workers.dev/setup
 ```
 
-### 3. 使用 Bot
+---
 
-在 Telegram 中打开你的 Bot，发送 `/start` 注册并获取 API Token。
+## 服务器同步
 
-**核心命令：**
+### 一键安装
 
-| 命令 | 说明 |
-|------|------|
-| `/start` | 注册 + 获取 API Token |
-| `/add <name> <url> <key> [model] [app]` | 添加供应商 |
-| `/list` | 查看所有供应商 (可点击切换/测试/删除) |
-| `/switch [id]` | 切换当前供应商 |
-| `/current [app]` | 查看当前供应商 |
-| `/test [id]` | 测试连通性 |
-| `/config [app]` | 查看生成的配置 |
-| `/stats` | 用量统计 |
-| `/token` | 查看/重置 API Token |
-
-**添加供应商示例：**
-```
-/add official https://api.anthropic.com sk-ant-xxx123
-/add packy https://api.packy.com sk-xxx claude-sonnet-4-20250514
-/add codex-relay https://api.openai.com/v1 sk-xxx gpt-4.1 codex
-/add gemini-pro https://generativelanguage.googleapis.com AIzaSyXXX gemini-2.0-flash gemini
-```
-
-### 4. 配置本地同步
-
-将 `agent/sync.sh` 复制到你运行 Claude Code 的机器上：
+在任意 Linux 服务器上运行：
 
 ```bash
-# 编辑配置
-export CC_SWITCH_BOT_API="https://your-worker.workers.dev"
-export CC_SWITCH_BOT_TOKEN="your_api_token_from_/start"
-export CC_SWITCH_BOT_APPS="claude"  # 空格分隔: claude codex gemini
-
-# 手动测试
-bash sync.sh
-
-# 添加到 crontab (每分钟同步)
-crontab -e
-# 添加:
-# * * * * * CC_SWITCH_BOT_API=https://xxx.workers.dev CC_SWITCH_BOT_TOKEN=xxx CC_SWITCH_BOT_APPS=claude /path/to/sync.sh >> /tmp/cc-switch-sync.log 2>&1
+curl -fsSL https://你的worker.workers.dev/install.sh | bash
 ```
+
+脚本会交互式询问 API Token（在 Bot 中发 `/start` 获取），然后自动：
+
+- 安装 sync 脚本到 `~/.cc-switch-bot/`
+- 配置 cron 每分钟自动同步
+- 创建 `~/.claude/` 等应用目录
+
+也支持静默安装：
+
+```bash
+CC_SWITCH_BOT_TOKEN=xxx CC_SWITCH_BOT_APPS="claude codex" \
+  curl -fsSL https://你的worker.workers.dev/install.sh | bash
+```
+
+### 同步原理
+
+```
+cron 每分钟 → sync.sh → GET /api/config?app=claude&format=raw
+                       → 对比内容是否变化
+                       → 变化时原子写入 ~/.claude/settings.json
+```
+
+不需要 root，所有文件在用户 home 目录下。
+
+### 卸载
+
+```bash
+crontab -l | grep -v cc-switch-bot-sync | crontab -; rm -rf ~/.cc-switch-bot
+```
+
+---
 
 ## REST API
 
-供本地 Agent 或自定义集成使用，所有请求需要 `Authorization: Bearer <token>` 头。
+供本地 Agent 或自定义集成使用，所有请求需 `Authorization: Bearer <token>` 头。
 
-```
-GET  /api/config?app=claude&format=raw  → 直接返回 settings.json 内容
-GET  /api/config?app=codex              → 返回 JSON 包含 config.toml + auth.json
-GET  /api/config?app=gemini&format=raw  → 直接返回 .env 内容
-GET  /api/providers?app=claude          → 供应商列表
-GET  /api/current?app=claude            → 当前供应商
-POST /api/stats                         → 上报用量 { input_tokens, output_tokens }
-GET  /api/stats?days=30                 → 用量统计
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/config?app=claude&format=raw` | 返回 settings.json 原文 |
+| GET | `/api/config?app=codex` | 返回 JSON 含 config.toml + auth.json |
+| GET | `/api/config?app=gemini&format=raw` | 返回 .env 原文 |
+| GET | `/api/providers?app=claude` | 供应商列表 |
+| GET | `/api/current?app=claude` | 当前活跃供应商 |
+| POST | `/api/stats` | 上报用量 `{ input_tokens, output_tokens }` |
+| GET | `/api/stats?days=30` | 用量统计 |
+| GET | `/health` | 健康检查 |
+| GET | `/install.sh` | 一键安装脚本 |
+| GET | `/init-db` | 初始化数据库表 |
+| GET | `/setup` | 注册 Telegram Webhook |
+
+---
 
 ## 配置文件格式
 
-Bot 生成的配置文件与 cc-switch-cli 完全兼容：
+生成的配置与 [cc-switch-cli](https://github.com/SaladDay/cc-switch-cli) 完全兼容：
 
-- **Claude**: `~/.claude/settings.json` (含 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`)
-- **Codex**: `~/.codex/config.toml` + `~/.codex/auth.json`
-- **Gemini**: `~/.gemini/.env`
+| 应用 | 文件 | 格式 |
+|------|------|------|
+| Claude | `~/.claude/settings.json` | `{ env: { ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL } }` |
+| Codex | `~/.codex/config.toml` + `auth.json` | TOML + JSON |
+| Gemini | `~/.gemini/.env` | `KEY=VALUE` |
+
+---
 
 ## 安全
 
-- API Key 使用 AES-GCM 加密存储在 D1 中
-- 所有 REST API 需要 Bearer Token 认证
-- 可选: `ADMIN_USER_ID` 限制只允许指定 Telegram 用户
-- Cloudflare Worker 默认 HTTPS
+- **API Key 加密存储**：AES-GCM 加密后存入 D1，密钥为你设置的 `ENCRYPTION_KEY`
+- **Bearer Token 认证**：REST API 全部需要 Token，在 Bot 中 `/start` 自动生成
+- **用户白名单**：设置 `ADMIN_USER_ID` 后只有你的 Telegram 账号能操作
+- **HTTPS**：Cloudflare Worker 默认全链路 HTTPS
+- **权限 600**：本地 `.env` 文件只有文件所有者可读
 
 ## License
 
