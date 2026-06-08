@@ -59,9 +59,9 @@
 🔸 第 1/4 步：选应用类型
   [🟣 Claude] [🟢 Codex] [🔵 Gemini]
   ↓
-🔸 第 2/4 步：输入名称  → 你打字，例: "猫佬API"
+🔸 第 2/4 步：输入名称  → 你打字，例: "MyProvider"
   ↓
-🔸 第 3/4 步：输入 URL   → https://maolaoapi.com/
+🔸 第 3/4 步：输入 URL   → https://api.example.com
   ↓
 🔸 第 4/4 步：输入 Key   → sk-xxx (加密存储)
   ↓
@@ -81,11 +81,11 @@
 在供应商详情页点 **📥 获取模型**，随时从 API 拉取可用模型并批量添加：
 
 ```
-🟣 猫佬API
+🟣 MyProvider
 
 ✅ 当前使用中
 📱 应用: claude
-🌐 地址: https://maolaoapi.com/
+🌐 地址: https://api.example.com
 🤖 模型: 默认
 🆔 ID: api-25064c
 
@@ -96,7 +96,7 @@
 点 📥 获取模型 →
 
 ```
-📥 猫佬API 模型列表
+📥 MyProvider 模型列表
 
 发现 15 个模型
 选择要批量添加为独立供应商的模型
@@ -115,7 +115,7 @@
 ```
 🔍 连通性测试
 
-🟢 猫佬API [claude]  326ms
+🟢 MyProvider [claude]  326ms
 🟢 Codex官方 [codex]  891ms
 🟡 Gemini中转 [gemini]  7200ms (降级)
 ```
@@ -132,7 +132,7 @@
 {
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "sk-xxx",
-    "ANTHROPIC_BASE_URL": "https://maolaoapi.com/"
+    "ANTHROPIC_BASE_URL": "https://api.example.com"
   }
 }
 ```
