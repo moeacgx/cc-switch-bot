@@ -1039,9 +1039,69 @@ async function handleApi(req, env, path) {
     const results = await performFailoverCheck(env, uid);
     return json({ results });
   }
+  if (path === '/api/sync-exec') {
+    const apps = (url.searchParams.get('apps') || 'claude').split(/[\s,]+/).filter(Boolean);
+    return new Response(getSyncLogic(apps), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  }
   return json({ error: 'Not found' }, 404);
 }
 function json(d, s = 200) { return new Response(JSON.stringify(d), { status: s, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }); }
+
+// ========================== Sync Logic (served by /api/sync-exec) ==========================
+
+function getSyncLogic(apps) {
+  const appList = apps.join(' ');
+  return `# CC-Switch Bot sync logic — auto-fetched from Worker, always latest
+A="Authorization: Bearer \${CC_SWITCH_BOT_TOKEN}"
+BASE="\${CC_SWITCH_BOT_API}"
+aw(){ local t="$1" c="$2"; [ -f "$t" ] && [ "$c" = "$(cat "$t" 2>/dev/null)" ] && return 0; local p; p=$(mktemp "\${t}.XXXXXX"); printf '%s' "$c">"$p"; mv -f "$p" "$t"; echo "[$(date +%H:%M:%S)] $t updated"; }
+
+# --- Config sync ---
+for app in ${appList}; do case "$app" in
+claude) [ -d ~/.claude ] && { c=$(curl -sf -H "$A" "$BASE/api/config?app=claude&format=raw") && aw ~/.claude/settings.json "$c"; } || true;;
+codex) d="\${CODEX_HOME:-~/.codex}"; [ -d "$d" ] && { r=$(curl -sf -H "$A" "$BASE/api/config?app=codex") && { t=$(echo "$r"|jq -r .content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['content'])" 2>/dev/null) && aw "$d/config.toml" "$t"; a=$(echo "$r"|jq -r .extraFile.content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['extraFile']['content'])" 2>/dev/null) && aw "$d/auth.json" "$a"; }; } || true;;
+gemini) [ -d ~/.gemini ] && { c=$(curl -sf -H "$A" "$BASE/api/config?app=gemini&format=raw") && aw ~/.gemini/.env "$c"; } || true;;
+openclaw) [ -d ~/.openclaw ] && { c=$(curl -sf -H "$A" "$BASE/api/config?app=openclaw&format=raw") && aw ~/.openclaw/openclaw.json "$c"; } || true;;
+hermes) if [ -d ~/.hermes ]; then c=$(curl -sf -H "$A" "$BASE/api/config?app=hermes&format=raw") || true; if [ -n "$c" ]; then aw ~/.hermes/config.yaml "$c"; if [ -d ~/.hermes/profiles ]; then for pd in ~/.hermes/profiles/*/; do [ -d "$pd" ] && aw "\${pd}config.yaml" "$c"; done; fi; fi; fi;;
+esac; done
+
+# --- Failover check ---
+curl -sf -X POST -H "$A" "$BASE/api/failover-check" >/dev/null 2>&1 || true
+
+# --- Prompts sync (CLAUDE.md / AGENTS.md / GEMINI.md) ---
+for app in ${appList}; do
+  case "$app" in
+    claude) pf=~/.claude/CLAUDE.md;; codex) pf="\${CODEX_HOME:-~/.codex}/AGENTS.md";; gemini) pf=~/.gemini/GEMINI.md;; openclaw) pf=~/.openclaw/AGENTS.md;; hermes) pf=~/.hermes/AGENTS.md;; *) continue;; esac
+  c=$(curl -sf -H "$A" "$BASE/api/prompt?app=$app&format=raw" 2>/dev/null) || continue
+  [ -n "$c" ] && [ "$c" != "null" ] && { aw "$pf" "$c"
+    if [ "$app" = "hermes" ] && [ -d ~/.hermes/profiles ]; then for pd in ~/.hermes/profiles/*/; do [ -d "$pd" ] && aw "\${pd}AGENTS.md" "$c"; done; fi; }
+done
+
+# --- Skills sync ---
+for app in ${appList}; do
+  case "$app" in
+    claude) sd=~/.claude/commands;; codex) sd="\${CODEX_HOME:-~/.codex}/commands";; openclaw) sd=~/.openclaw/commands;; hermes) sd=~/.hermes/skills;; *) continue;; esac
+  r=$(curl -sf -H "$A" "$BASE/api/skills?app=$app" 2>/dev/null) || continue
+  if command -v jq &>/dev/null; then
+    cnt=$(echo "$r"|jq '.skills|length'); [ "$cnt" = "0" ] || [ -z "$cnt" ] && continue
+    mkdir -p "$sd"
+    echo "$r"|jq -r '.skills[]|"\\(.name)\\t\\(.content)"' 2>/dev/null | while IFS=$'\\t' read -r sn sc; do aw "$sd/\${sn}.md" "$sc"; done
+  elif command -v python3 &>/dev/null; then
+    python3 -c "
+import sys,json,os
+d=json.load(sys.stdin)
+for s in d.get('skills',[]):
+    os.makedirs('$sd',exist_ok=True)
+    p=os.path.join('$sd',s['name']+'.md')
+    c=s['content']
+    if os.path.exists(p) and open(p).read()==c: continue
+    open(p,'w').write(c)
+    print(f'[{__import__(\"datetime\").datetime.now():%H:%M:%S}] {p} updated')
+" <<< "$r" 2>/dev/null
+  fi
+done
+`;
+}
 
 // ========================== Install Script ==========================
 
@@ -1068,49 +1128,12 @@ EOF
 chmod 600 "\$ENV_FILE"; ok ".env 写入"
 cat > "\$SYNC_SCRIPT" <<'SEOF'
 #!/usr/bin/env bash
-set -euo pipefail; D="\$(cd "\$(dirname "\$0")" && pwd)"; [ -f "\$D/.env" ] && set -a && . "\$D/.env" && set +a
-[ -z "\${CC_SWITCH_BOT_API:-}" ] && exit 1; A="Authorization: Bearer \${CC_SWITCH_BOT_TOKEN}"
-aw(){ local t="\$1" c="\$2"; [ -f "\$t" ] && [ "\$c" = "\$(cat "\$t" 2>/dev/null)" ] && return 0; local p; p=\$(mktemp "\${t}.XXXXXX"); printf '%s' "\$c">"\$p"; mv -f "\$p" "\$t"; echo "[\$(date +%H:%M:%S)] \$t updated"; }
-for app in \${CC_SWITCH_BOT_APPS:-claude}; do case "\$app" in
-claude) [ -d ~/.claude ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=claude&format=raw") && aw ~/.claude/settings.json "\$c"; } || true;;
-codex) d="\${CODEX_HOME:-~/.codex}"; [ -d "\$d" ] && { r=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=codex") && { t=\$(echo "\$r"|jq -r .content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['content'])" 2>/dev/null) && aw "\$d/config.toml" "\$t"; a=\$(echo "\$r"|jq -r .extraFile.content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['extraFile']['content'])" 2>/dev/null) && aw "\$d/auth.json" "\$a"; }; } || true;;
-gemini) [ -d ~/.gemini ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=gemini&format=raw") && aw ~/.gemini/.env "\$c"; } || true;;
-openclaw) [ -d ~/.openclaw ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=openclaw&format=raw") && aw ~/.openclaw/openclaw.json "\$c"; } || true;;
-hermes) if [ -d ~/.hermes ]; then c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=hermes&format=raw") || true; if [ -n "\$c" ]; then aw ~/.hermes/config.yaml "\$c"; if [ -d ~/.hermes/profiles ]; then for pd in ~/.hermes/profiles/*/; do [ -d "\$pd" ] && aw "\${pd}config.yaml" "\$c"; done; fi; fi; fi;;
-esac; done
-# Failover check
-curl -sf -X POST -H "\$A" "\${CC_SWITCH_BOT_API}/api/failover-check" >/dev/null 2>&1 || true
-# Sync prompts (CLAUDE.md / AGENTS.md / GEMINI.md)
-for app in \${CC_SWITCH_BOT_APPS:-claude}; do
-  case "\$app" in
-    claude) pf=~/.claude/CLAUDE.md;; codex) pf="\${CODEX_HOME:-~/.codex}/AGENTS.md";; gemini) pf=~/.gemini/GEMINI.md;; openclaw) pf=~/.openclaw/AGENTS.md;; hermes) pf=~/.hermes/AGENTS.md;; *) continue;; esac
-  c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/prompt?app=\$app&format=raw" 2>/dev/null) || continue
-  [ -n "\$c" ] && [ "\$c" != "null" ] && { aw "\$pf" "\$c"
-    if [ "\$app" = "hermes" ] && [ -d ~/.hermes/profiles ]; then for pd in ~/.hermes/profiles/*/; do [ -d "\$pd" ] && aw "\${pd}AGENTS.md" "\$c"; done; fi; }
-done
-# Sync skills per app
-for app in \${CC_SWITCH_BOT_APPS:-claude}; do
-  case "\$app" in
-    claude) sd=~/.claude/commands;; codex) sd="\${CODEX_HOME:-~/.codex}/commands";; openclaw) sd=~/.openclaw/commands;; hermes) sd=~/.hermes/skills;; *) continue;; esac
-  r=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/skills?app=\$app" 2>/dev/null) || continue
-  if command -v jq &>/dev/null; then
-    cnt=\$(echo "\$r"|jq '.skills|length'); [ "\$cnt" = "0" ] || [ -z "\$cnt" ] && continue
-    mkdir -p "\$sd"
-    echo "\$r"|jq -r '.skills[]|"\\(.name)\\t\\(.content)"' 2>/dev/null | while IFS=\$'\\t' read -r sn sc; do aw "\$sd/\${sn}.md" "\$sc"; done
-  elif command -v python3 &>/dev/null; then
-    python3 -c "
-import sys,json,os
-d=json.load(sys.stdin)
-for s in d.get('skills',[]):
-    os.makedirs('\$sd',exist_ok=True)
-    p=os.path.join('\$sd',s['name']+'.md')
-    c=s['content']
-    if os.path.exists(p) and open(p).read()==c: continue
-    open(p,'w').write(c)
-    print(f'[{__import__(\"datetime\").datetime.now():%H:%M:%S}] {p} updated')
-" <<< "\$r" 2>/dev/null
-  fi
-done
+# Thin wrapper — actual sync logic lives on the Worker, always latest
+set -euo pipefail
+D="\$(cd "\$(dirname "\$0")" && pwd)"; [ -f "\$D/.env" ] && set -a && . "\$D/.env" && set +a
+[ -z "\${CC_SWITCH_BOT_API:-}" ] && exit 1
+S=\$(curl -sf -H "Authorization: Bearer \${CC_SWITCH_BOT_TOKEN}" "\${CC_SWITCH_BOT_API}/api/sync-exec?apps=\${CC_SWITCH_BOT_APPS:-claude}" 2>/dev/null) || { echo "[\$(date +%H:%M:%S)] Failed to fetch sync logic"; exit 1; }
+eval "\$S"
 SEOF
 chmod +x "\$SYNC_SCRIPT"; ok "sync.sh 安装完成"
 crontab -l 2>/dev/null | grep -v cc-switch-bot-sync > /tmp/.cc-cron || true
