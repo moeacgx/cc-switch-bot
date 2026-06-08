@@ -60,16 +60,12 @@ function genClaudeConfig(url, key, model, fmt, modelsJson) {
   else if (fmt==='gemini_native') { e.GOOGLE_API_KEY=key;e.GEMINI_BASE_URL=url; }
   else { e[key.startsWith('sk-ant-')?'ANTHROPIC_API_KEY':'ANTHROPIC_AUTH_TOKEN']=key;e.ANTHROPIC_BASE_URL=url; }
 
-  // Claude uses 3 model slots: Sonnet, Haiku, Opus — auto-map from available models
+  // Claude 3-tier: read from JSON mapping in model field
   if (!fmt || fmt === 'anthropic') {
-    const models = modelsJson ? JSON.parse(modelsJson) : [];
-    const find = (kw) => models.find(m => m.toLowerCase().includes(kw));
-    const sonnet = find('sonnet') || model;
-    const haiku = find('haiku');
-    const opus = find('opus');
-    if (sonnet) e.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;
-    if (haiku) e.ANTHROPIC_DEFAULT_HAIKU_MODEL = haiku;
-    if (opus) e.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
+    const m = parseClaudeMapping(model);
+    if (m.sonnet) e.ANTHROPIC_DEFAULT_SONNET_MODEL = m.sonnet;
+    if (m.haiku) e.ANTHROPIC_DEFAULT_HAIKU_MODEL = m.haiku;
+    if (m.opus) e.ANTHROPIC_DEFAULT_OPUS_MODEL = m.opus;
   }
   return JSON.stringify({env:e},null,2);
 }
@@ -146,12 +142,18 @@ function providerListKb(ps) {
   return kb(rows);
 }
 
-function providerActionKb(id, hasModels) {
+function providerActionKb(id, appType, hasModels) {
   const rows = [
     [btn('🔄 切换到此', `switch:${id}`), btn('🔍 测试连通', `test:${id}`)],
     [btn('📥 获取模型', `models:${id}`)],
   ];
-  if (hasModels) rows[1].push(btn('🔀 切换模型', `chmodel:${id}`));
+  if (hasModels) {
+    if (appType === 'claude') {
+      rows[1].push(btn('⚙️ 模型映射', `mapping:${id}`));
+    } else {
+      rows[1].push(btn('🔀 切换模型', `chmodel:${id}`));
+    }
+  }
   rows.push([btn('🗑 删除', `delc:${id}`)]);
   return kb(rows);
 }
@@ -311,15 +313,36 @@ async function showProviderInfo(env, uid, id) {
   const cur = p.is_current ? '✅ *当前使用中*\n' : '';
   const models = p.models_json ? JSON.parse(p.models_json) : [];
   const modelsText = models.length > 0 ? `\n📦 可用模型: *${models.length}* 个` : '';
+
+  let modelInfo;
+  if (p.app_type === 'claude') {
+    const m = parseClaudeMapping(p.model);
+    modelInfo = `🤖 Sonnet → ${m.sonnet || '_未设置_'}\n🤖 Haiku  → ${m.haiku || '_未设置_'}\n🤖 Opus   → ${m.opus || '_未设置_'}`;
+  } else {
+    modelInfo = `🤖 模型: ${p.model || '默认'}`;
+  }
+
   return md(
     `${icon} *${p.name}*\n\n` +
     `${cur}` +
     `📱 应用: ${p.app_type}\n` +
     `🌐 地址: \`${p.base_url}\`\n` +
-    `🤖 当前模型: ${p.model || '默认'}${modelsText}\n` +
+    `${modelInfo}${modelsText}\n` +
     `🆔 ID: \`${p.id}\``,
-    providerActionKb(id, models.length > 0)
+    providerActionKb(id, p.app_type, models.length > 0)
   );
+}
+
+// Parse Claude model field: JSON mapping or legacy string
+function parseClaudeMapping(model) {
+  if (!model) return {};
+  try { const m = JSON.parse(model); if (typeof m === 'object' && !Array.isArray(m)) return m; } catch {}
+  // Legacy: plain string → treat as sonnet
+  return { sonnet: model };
+}
+
+function serializeClaudeMapping(mapping) {
+  return JSON.stringify(mapping);
 }
 
 // ========================== Provider Model Management ==========================
@@ -344,13 +367,29 @@ async function startModelsFetch(env, uid, provId) {
   const apiKey = await decrypt(p.api_key_encrypted, env.ENCRYPTION_KEY);
   const models = await fetchModels(p.base_url, apiKey, p.app_type);
 
-  if (models.length === 0) return md(`📥 *获取模型*\n\n未能从该 API 获取到模型列表\n\n_可能不支持 /v1/models 端点_`, providerActionKb(provId, false));
+  if (models.length === 0) return md(`📥 *获取模型*\n\n未能从该 API 获取到模型列表\n\n_可能不支持 /v1/models 端点_`, providerActionKb(provId, p.app_type, false));
 
-  // Save models to this provider
+  // Save model list
   await dbUpdateProvModels(env.DB, uid, provId, JSON.stringify(models));
 
+  // For Claude: auto-map to 3 slots and save
+  if (p.app_type === 'claude') {
+    const find = (kw) => models.find(m => m.toLowerCase().includes(kw));
+    const mapping = { sonnet: find('sonnet') || null, haiku: find('haiku') || null, opus: find('opus') || null };
+    await dbUpdateProvModel(env.DB, uid, provId, serializeClaudeMapping(mapping));
+    return md(
+      `📥 *${p.name}*\n\n发现 *${models.length}* 个模型，已自动映射：\n\n` +
+      `🤖 Sonnet → ${mapping.sonnet || '_未匹配_'}\n` +
+      `🤖 Haiku  → ${mapping.haiku || '_未匹配_'}\n` +
+      `🤖 Opus   → ${mapping.opus || '_未匹配_'}\n\n` +
+      `_点 ⚙️ 模型映射 可手动修改_`,
+      providerActionKb(provId, 'claude', true)
+    );
+  }
+
+  // For Codex/Gemini: show picker
   return md(
-    `📥 *${p.name}*\n\n发现 *${models.length}* 个可用模型\n当前: ${p.model || '默认'}\n\n_点击模型切换为当前使用的模型_`,
+    `📥 *${p.name}*\n\n发现 *${models.length}* 个可用模型\n当前: ${p.model || '默认'}\n\n_点击模型切换_`,
     modelPickKb(models, p.model, provId)
   );
 }
@@ -379,6 +418,75 @@ async function handleSetModel(env, uid, provId, modelIdx) {
 
   const icon = p.app_type === 'claude' ? '🟣' : p.app_type === 'codex' ? '🟢' : '🔵';
   return md(`✅ *模型已切换！*\n\n${icon} *${p.name}*\n🤖 → *${model}*\n\n_同步 Agent 将在下次拉取时生效_`);
+}
+
+// ========================== Claude Model Mapping ==========================
+
+function mappingSlotKb(provId, mapping) {
+  return kb([
+    [btn(`🔸 Sonnet: ${mapping.sonnet || '未设置'}`, `mapslot:${provId}:sonnet`)],
+    [btn(`🔹 Haiku: ${mapping.haiku || '未设置'}`, `mapslot:${provId}:haiku`)],
+    [btn(`🔻 Opus: ${mapping.opus || '未设置'}`, `mapslot:${provId}:opus`)],
+  ]);
+}
+
+function slotModelPickKb(models, provId, slot) {
+  const rows = [];
+  for (let i = 0; i < models.length; i += 2) {
+    const row = [];
+    for (let j = i; j < i + 2 && j < models.length; j++) {
+      row.push(btn(models[j].slice(0, 26), `setslot:${provId}:${slot}:${j}`));
+    }
+    rows.push(row);
+  }
+  rows.push([btn('◀️ 返回槽位', `mapping:${provId}`)]);
+  return kb(rows);
+}
+
+async function showMapping(env, uid, provId) {
+  const p = await dbProvider(env.DB, uid, provId);
+  if (!p) return md('❌ 供应商不存在');
+  const m = parseClaudeMapping(p.model);
+  return md(
+    `⚙️ *${p.name} — 模型映射*\n\n` +
+    `点击槽位修改映射：\n\n` +
+    `🔸 *Sonnet* (默认模型)\n   → ${m.sonnet || '_未设置_'}\n\n` +
+    `🔹 *Haiku* (快速模型)\n   → ${m.haiku || '_未设置_'}\n\n` +
+    `🔻 *Opus* (强力模型)\n   → ${m.opus || '_未设置_'}`,
+    mappingSlotKb(provId, m)
+  );
+}
+
+async function showSlotPicker(env, uid, provId, slot) {
+  const p = await dbProvider(env.DB, uid, provId);
+  if (!p) return md('❌ 供应商不存在');
+  const models = p.models_json ? JSON.parse(p.models_json) : [];
+  if (!models.length) return md('先点 📥 获取模型');
+  const slotName = slot === 'sonnet' ? '🔸 Sonnet' : slot === 'haiku' ? '🔹 Haiku' : '🔻 Opus';
+  const m = parseClaudeMapping(p.model);
+  return md(
+    `⚙️ 选择 *${slotName}* 模型\n\n当前: ${m[slot] || '未设置'}\n\n_从下方列表选择：_`,
+    slotModelPickKb(models, provId, slot)
+  );
+}
+
+async function handleSetSlot(env, uid, provId, slot, modelIdx) {
+  const p = await dbProvider(env.DB, uid, provId);
+  if (!p) return md('❌ 供应商不存在');
+  const models = p.models_json ? JSON.parse(p.models_json) : [];
+  const model = models[parseInt(modelIdx)];
+  if (!model) return md('❌ 无效模型');
+
+  const m = parseClaudeMapping(p.model);
+  m[slot] = model;
+  await dbUpdateProvModel(env.DB, uid, provId, serializeClaudeMapping(m));
+
+  const slotName = slot === 'sonnet' ? '🔸 Sonnet' : slot === 'haiku' ? '🔹 Haiku' : '🔻 Opus';
+  return md(
+    `✅ *${slotName}* 已映射到\n→ *${model}*\n\n` +
+    `当前映射：\n🔸 Sonnet → ${m.sonnet || '_未设置_'}\n🔹 Haiku → ${m.haiku || '_未设置_'}\n🔻 Opus → ${m.opus || '_未设置_'}`,
+    mappingSlotKb(provId, m)
+  );
 }
 
 async function showSwitch(env, uid) {
@@ -495,6 +603,9 @@ async function handleCallback(env, uid, data) {
   if (action === 'models') return await startModelsFetch(env, uid, param);
   if (action === 'chmodel') return await showModelPicker(env, uid, param);
   if (action === 'setmodel') { const [pid, midx] = param.split(':'); return await handleSetModel(env, uid, pid, midx); }
+  if (action === 'mapping') return await showMapping(env, uid, param);
+  if (action === 'mapslot') { const [pid, slot] = param.split(':'); return await showSlotPicker(env, uid, pid, slot); }
+  if (action === 'setslot') { const parts = param.split(':'); return await handleSetSlot(env, uid, parts[0], parts[1], parts[2]); }
   if (action === 'delc') { const p = await dbProvider(env.DB, uid, param); return p ? md(`⚠️ *确认删除？*\n\n🗑 ${p.name} [${p.app_type}]\n\n_不可恢复_`, confirmDeleteKb(param)) : md('未找到'); }
   if (action === 'dele') { await dbDeleteProv(env.DB, uid, param); return md('✅ *已删除*'); }
 
