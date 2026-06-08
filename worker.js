@@ -172,7 +172,7 @@ function replyKb() {
       ['🔄 切换供应商', '✅ 当前状态'],
       ['🔍 连通性测试', '📄 查看配置'],
       ['🧩 Skills管理', '📊 用量统计'],
-      ['🔑 API Token'],
+      ['🔑 API Token', 'ℹ️ 系统信息'],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -190,6 +190,7 @@ const REPLY_KB_MAP = {
   '🧩 Skills管理': 'skills',
   '📊 用量统计':   'stats',
   '🔑 API Token': 'token',
+  'ℹ️ 系统信息':   'sysinfo',
 };
 
 function appTypeKb(action) {
@@ -751,6 +752,36 @@ async function resetToken(env, uid) {
   return md(`🔑 *Token 已重置！*\n\n新 Token:\n\`${t}\`\n\n⚠️ _记得更新所有服务器的 sync agent_`);
 }
 
+async function showSysInfo(env, uid, origin) {
+  const s = await dbSettings(env.DB, uid);
+  const token = s?.api_token || '(未注册)';
+  const provCount = (await dbProviders(env.DB, uid)).length;
+  const skillCount = (await dbSkills(env.DB, uid)).length;
+
+  const installCmd = `curl -fsSL ${origin}/install.sh | bash`;
+  const silentCmd = `CC_SWITCH_BOT_TOKEN=${token} CC_SWITCH_BOT_APPS="claude" \\\n  curl -fsSL ${origin}/install.sh | bash`;
+
+  return md(
+    `ℹ️ *系统信息*\n\n` +
+    `🌐 *Worker 地址:*\n\`${origin}\`\n\n` +
+    `🔑 *API Token:*\n\`${token}\`\n\n` +
+    `📊 *数据统计:*\n` +
+    `  供应商: ${provCount} 个\n` +
+    `  Skills: ${skillCount} 个\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📋 *一键安装命令* (复制到服务器运行):\n\n` +
+    `\`\`\`\n${installCmd}\n\`\`\`\n\n` +
+    `📋 *静默安装* (无交互):\n\n` +
+    `\`\`\`\n${silentCmd}\n\`\`\`\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📡 *API 端点:*\n` +
+    `\`GET ${origin}/api/config?app=claude\`\n` +
+    `\`POST ${origin}/api/failover-check\`\n` +
+    `\`GET ${origin}/api/skills?app=claude\`\n` +
+    `\`GET ${origin}/health\``
+  );
+}
+
 // ========================== Callback Router ==========================
 
 async function handleCallback(env, uid, data) {
@@ -805,7 +836,7 @@ async function handleCallback(env, uid, data) {
 
 // ========================== Message Handler ==========================
 
-async function handleMessage(env, uid, text, firstName) {
+async function handleMessage(env, uid, text, firstName, origin) {
   // 1. Check ongoing conversation flows
   const convo = await getConvo(env.DB, uid);
   if (convo && (convo.state.startsWith('add_') || convo.state.startsWith('skill_') || convo.state === 'cfg_upload')) {
@@ -840,6 +871,7 @@ async function handleMessage(env, uid, text, firstName) {
       case 'skills':  return await showSkills(env, uid);
       case 'stats':   return await showStats(env, uid, null);
       case 'token':   return await showToken(env, uid);
+      case 'sysinfo': return await showSysInfo(env, uid, origin);
     }
   }
 
@@ -972,7 +1004,7 @@ claude) [ -d ~/.claude ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/
 codex) d="\${CODEX_HOME:-~/.codex}"; [ -d "\$d" ] && { r=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=codex") && { t=\$(echo "\$r"|jq -r .content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['content'])" 2>/dev/null) && aw "\$d/config.toml" "\$t"; a=\$(echo "\$r"|jq -r .extraFile.content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['extraFile']['content'])" 2>/dev/null) && aw "\$d/auth.json" "\$a"; }; } || true;;
 gemini) [ -d ~/.gemini ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=gemini&format=raw") && aw ~/.gemini/.env "\$c"; } || true;;
 openclaw) [ -d ~/.openclaw ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=openclaw&format=raw") && aw ~/.openclaw/openclaw.json "\$c"; } || true;;
-hermes) [ -d ~/.hermes ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=hermes&format=raw") && aw ~/.hermes/config.yaml "\$c"; } || true;;
+hermes) if [ -d ~/.hermes ]; then c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=hermes&format=raw") || true; if [ -n "\$c" ]; then aw ~/.hermes/config.yaml "\$c"; if [ -d ~/.hermes/profiles ]; then for pd in ~/.hermes/profiles/*/; do [ -d "\$pd" ] && aw "\${pd}config.yaml" "\$c"; done; fi; fi; fi;;
 esac; done
 # Failover check
 curl -sf -X POST -H "$A" "${CC_SWITCH_BOT_API}/api/failover-check" >/dev/null 2>&1 || true
@@ -1091,7 +1123,7 @@ export default {
         else if (u.message?.text) {
           const cid = u.message.chat.id, uid = String(u.message.from?.id || cid);
           if (env.ADMIN_USER_ID && env.ADMIN_USER_ID !== uid) { await tgSend(env.BOT_TOKEN, cid, { text: '⛔ 无权限' }); return new Response('ok'); }
-          const reply = await handleMessage(env, uid, u.message.text, u.message.from?.first_name);
+          const reply = await handleMessage(env, uid, u.message.text, u.message.from?.first_name, url.origin);
           if (reply) await tgSend(env.BOT_TOKEN, cid, reply);
         }
         return new Response('ok');
