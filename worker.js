@@ -131,11 +131,19 @@ async function genConfig(db, ek, uid, app) {
   default:return null; } }
 
 // ========================== Health Check ==========================
+// Errors that mean "provider works but rejects non-CC clients" — don't failover
+const CC_ONLY_PATTERNS = ['claude code client', 'only allows claude', 'claude-code', 'client verification'];
+
 async function checkProv(db, ek, uid, pid) {
   const p = await dbProvider(db, uid, pid); if (!p) return { status:'failed', ms:null, err:'Not found', name:'?', app:'?' };
   const k = await decrypt(p.api_key_encrypted, ek);
   try { const { ms } = await streamTest(p.app_type, p.base_url, k, p.model, p.api_format); return { name:p.name, app:p.app_type, status:ms<=6000?'operational':'degraded', ms }; }
-  catch(e) { return { name:p.name, app:p.app_type, status:'failed', ms:null, err:e.message?.slice(0,200) }; }
+  catch(e) {
+    const msg = e.message?.slice(0,300) || '';
+    const isCcOnly = CC_ONLY_PATTERNS.some(p => msg.toLowerCase().includes(p));
+    if (isCcOnly) return { name:p.name, app:p.app_type, status:'skipped', ms:null, err:'仅限 Claude Code 客户端 (无法远程验证，跳过)' };
+    return { name:p.name, app:p.app_type, status:'failed', ms:null, err:msg.slice(0,200) };
+  }
 }
 async function streamTest(app, base, key, model, fmt) {
   const b = base.replace(/\/$/,''); let url, headers, body;
@@ -772,7 +780,7 @@ async function showCurrent(env, uid) {
 async function showTest(env, uid, specificId) {
   if (specificId) {
     const r = await checkProv(env.DB, env.ENCRYPTION_KEY, uid, specificId);
-    const icon = r.status === 'operational' ? '🟢' : r.status === 'degraded' ? '🟡' : '🔴';
+    const icon = r.status === 'operational' ? '🟢' : r.status === 'degraded' ? '🟡' : r.status === 'skipped' ? '⚪' : '🔴';
     let t = `🔍 *连通性测试*\n\n${icon} *${r.name}* [${r.app}]\n状态: *${r.status}*\n`;
     if (r.ms != null) t += `延迟: *${r.ms}ms*\n`;
     if (r.err) t += `错误: \`${r.err}\`\n`;
@@ -784,7 +792,7 @@ async function showTest(env, uid, specificId) {
     if (cur) {
       tested = true;
       const r = await checkProv(env.DB, env.ENCRYPTION_KEY, uid, cur.id);
-      const icon = r.status === 'operational' ? '🟢' : r.status === 'degraded' ? '🟡' : '🔴';
+      const icon = r.status === 'operational' ? '🟢' : r.status === 'degraded' ? '🟡' : r.status === 'skipped' ? '⚪' : '🔴';
       t += `${icon} *${r.name}* [${app}]${r.ms != null ? '  '+r.ms+'ms' : ''}${r.err ? '\n   '+r.err.slice(0,80) : ''}\n`;
     }
   }
