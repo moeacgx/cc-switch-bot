@@ -32,7 +32,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(user_id, recorded_at);
 CREATE TABLE IF NOT EXISTS settings (user_id TEXT PRIMARY KEY, api_token TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS conversations (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, enabled_apps TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id);`;
+CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id);
+CREATE TABLE IF NOT EXISTS config_overrides (user_id TEXT NOT NULL, app_type TEXT NOT NULL, content TEXT NOT NULL, filename TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, app_type));`;
 
 // ========================== DB Helpers ==========================
 const now = () => Date.now();
@@ -63,6 +64,11 @@ async function dbUpdateSkillApps(db, uid, id, apps) { await db.prepare('UPDATE s
 async function dbDeleteSkill(db, uid, id) { return (await db.prepare('DELETE FROM skills WHERE id=? AND user_id=?').bind(id, uid).run()).meta.changes > 0; }
 async function dbSkillsForApp(db, uid, app) { return (await db.prepare("SELECT * FROM skills WHERE user_id=? AND enabled_apps LIKE ? ORDER BY name").bind(uid, `%"${app}"%`).all()).results; }
 
+// -- Config Overrides --
+async function dbGetOverride(db, uid, app) { return db.prepare('SELECT * FROM config_overrides WHERE user_id=? AND app_type=?').bind(uid, app).first(); }
+async function dbSetOverride(db, uid, app, content, filename) { await db.prepare('INSERT INTO config_overrides(user_id,app_type,content,filename,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,app_type) DO UPDATE SET content=excluded.content,filename=excluded.filename,updated_at=excluded.updated_at').bind(uid, app, content, filename, now()).run(); }
+async function dbDeleteOverride(db, uid, app) { await db.prepare('DELETE FROM config_overrides WHERE user_id=? AND app_type=?').bind(uid, app).run(); }
+
 // ========================== Config Gen ==========================
 const ALL_APPS = ['claude', 'codex', 'gemini', 'openclaw', 'hermes'];
 const APP_ICONS = { claude: '🟣', codex: '🟢', gemini: '🔵', openclaw: '🟠', hermes: '🟤' };
@@ -86,7 +92,12 @@ function genCodexConfig(url, key, model, name) { const s=(name||'custom').toLowe
 function genGeminiEnv(url, key, model) { const l=[`GEMINI_API_KEY=${key}`]; if(url)l.push(`GEMINI_BASE_URL=${url}`); if(model)l.push(`GEMINI_MODEL=${model}`); return l.sort().join('\n')+'\n'; }
 function genOpenClawConfig(url, key, model) { const p = { base_url: url, api_key: key }; if (model) p.model = model; return JSON.stringify({ provider: p }, null, 2); }
 function genHermesConfig(url, key, model) { return `provider:\n  base_url: "${url}"\n  api_key: "${key}"\n${model ? `  model: "${model}"\n` : ''}`; }
-async function genConfig(db, ek, uid, app) { const p=await dbCurrent(db,uid,app); if(!p)return null; const k=await decrypt(p.api_key_encrypted,ek); switch(app){
+async function genConfig(db, ek, uid, app) {
+  // Check for manual override first
+  const ov = await dbGetOverride(db, uid, app);
+  if (ov) return { fmt: 'raw', fn: ov.filename || `${app}-config`, content: ov.content, extra: null, isOverride: true };
+  // Generate from provider
+  const p=await dbCurrent(db,uid,app); if(!p)return null; const k=await decrypt(p.api_key_encrypted,ek); switch(app){
   case'claude':return{fmt:'json',fn:'settings.json',content:genClaudeConfig(p.base_url,k,p.model,p.api_format,p.models_json),extra:null};
   case'codex':{const c=genCodexConfig(p.base_url,k,p.model,p.name);return{fmt:'toml',fn:'config.toml',content:c.toml,extra:{fn:'auth.json',content:c.auth}};}
   case'gemini':return{fmt:'env',fn:'.env',content:genGeminiEnv(p.base_url,k,p.model),extra:null};
@@ -115,6 +126,20 @@ async function tgApi(tok, method, body) { await fetch(`https://api.telegram.org/
 async function tgSend(tok, cid, p) { await tgApi(tok, 'sendMessage', { chat_id:cid, ...p }); }
 async function tgEdit(tok, cid, mid, p) { await tgApi(tok, 'editMessageText', { chat_id:cid, message_id:mid, ...p }); }
 async function tgAnswer(tok, cbid, text) { await tgApi(tok, 'answerCallbackQuery', { callback_query_id:cbid, text }); }
+async function tgSendFile(tok, cid, content, filename, caption) {
+  const form = new FormData();
+  form.append('chat_id', String(cid));
+  form.append('document', new Blob([content], { type: 'application/octet-stream' }), filename);
+  if (caption) form.append('caption', caption);
+  await fetch(`https://api.telegram.org/bot${tok}/sendDocument`, { method: 'POST', body: form });
+}
+async function tgGetFile(tok, fileId) {
+  const r = await fetch(`https://api.telegram.org/bot${tok}/getFile`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_id: fileId }) });
+  const data = await r.json();
+  if (!data.ok || !data.result?.file_path) return null;
+  const fr = await fetch(`https://api.telegram.org/file/bot${tok}/${data.result.file_path}`);
+  return fr.ok ? await fr.text() : null;
+}
 function md(t, kb) { const r = { text: t, parse_mode: 'Markdown' }; if (kb) r.reply_markup = kb; return r; }
 function kb(rows) { return { inline_keyboard: rows }; }
 function btn(t, d) { return { text: t, callback_data: d }; }
@@ -673,10 +698,14 @@ async function showTest(env, uid, specificId) {
 async function showConfig(env, uid, app) {
   if (!app) return md('📄 *查看配置*\n\n选择应用类型：', appTypeKb('cfg'));
   const c = await genConfig(env.DB, env.ENCRYPTION_KEY, uid, app);
-  if (!c) return md(`📄 *${app}* 暂无活跃供应商`);
-  let t = `📄 *${app}* (\`${c.fn}\`)\n\`\`\`\n${c.content}\`\`\``;
+  if (!c) return md(`📄 *${app}* 暂无配置\n\n_添加供应商或上传自定义配置_`, kb([[btn('📤 上传配置', `cfgupload:${app}`)]]));
+  const source = c.isOverride ? '📤 _自定义上传_' : '🔄 _自动生成_';
+  const preview = c.content.length > 2000 ? c.content.slice(0, 2000) + '\n...' : c.content;
+  let t = `📄 *${app}* (\`${c.fn}\`) ${source}\n\`\`\`\n${preview}\`\`\``;
   if (c.extra) t += `\n\`${c.extra.fn}\`:\n\`\`\`\n${c.extra.content}\`\`\``;
-  return md(t);
+  const btns = [[btn('📥 下载文件', `cfgdl:${app}`), btn('📤 上传替换', `cfgupload:${app}`)]];
+  if (c.isOverride) btns.push([btn('🗑 清除自定义 (恢复自动生成)', `cfgclear:${app}`)]);
+  return md(t, kb(btns));
 }
 
 async function showStats(env, uid, days) {
@@ -743,6 +772,9 @@ async function handleCallback(env, uid, data) {
 
   // Config / Stats / Token
   if (action === 'cfg') return await showConfig(env, uid, param);
+  if (action === 'cfgdl') return { _action: 'sendFile', app: param }; // handled specially in webhook
+  if (action === 'cfgupload') { await setConvo(env.DB, uid, 'cfg_upload', { app: param }); return md(`📤 *上传 ${param} 配置*\n\n直接发送配置文件 (.json / .toml / .yaml / .env)\n或发送文本内容\n\n_将替换自动生成的配置，sync agent 会同步此内容_`, cancelKb()); }
+  if (action === 'cfgclear') { await dbDeleteOverride(env.DB, uid, param); return md(`✅ *${param}* 自定义配置已清除\n\n_恢复为自动生成模式_`); }
   if (action === 'stats') return await showStats(env, uid, parseInt(param));
   if (action === 'token_reset') return await resetToken(env, uid);
   if (action === 'noop') return null; // do nothing, avoid error
@@ -755,20 +787,19 @@ async function handleCallback(env, uid, data) {
 async function handleMessage(env, uid, text, firstName) {
   // 1. Check ongoing conversation flows
   const convo = await getConvo(env.DB, uid);
-  if (convo && (convo.state.startsWith('add_') || convo.state.startsWith('skill_'))) {
+  if (convo && (convo.state.startsWith('add_') || convo.state.startsWith('skill_') || convo.state === 'cfg_upload')) {
     if (REPLY_KB_MAP[text]) {
       await clearConvo(env.DB, uid);
-      // Fall through to handle the button
     } else {
-      // Try add-provider flow
-      if (convo.state.startsWith('add_')) {
-        const result = await handleAddText(env, uid, text);
-        if (result) return result;
-      }
-      // Try skill-add flow
-      if (convo.state.startsWith('skill_')) {
-        const result = await handleSkillAddText(env, uid, text);
-        if (result) return result;
+      if (convo.state.startsWith('add_')) { const r = await handleAddText(env, uid, text); if (r) return r; }
+      if (convo.state.startsWith('skill_')) { const r = await handleSkillAddText(env, uid, text); if (r) return r; }
+      if (convo.state === 'cfg_upload') {
+        // User sent text as config content
+        const app = convo.data.app;
+        const fnMap = { claude: 'settings.json', codex: 'config.toml', gemini: '.env', openclaw: 'openclaw.json', hermes: 'config.yaml' };
+        await dbSetOverride(env.DB, uid, app, text, fnMap[app] || 'config');
+        await clearConvo(env.DB, uid);
+        return md(`✅ *${app} 配置已上传！*\n\n📏 ${text.length} 字符\n_sync agent 下次同步时生效_`);
       }
     }
   }
@@ -940,9 +971,53 @@ export default {
           if (!cid) return new Response('ok');
           if (env.ADMIN_USER_ID && env.ADMIN_USER_ID !== uid) { await tgAnswer(env.BOT_TOKEN, u.callback_query.id, '⛔ 无权限'); return new Response('ok'); }
           const reply = await handleCallback(env, uid, u.callback_query.data || '');
-          if (reply) await tgEdit(env.BOT_TOKEN, cid, u.callback_query.message.message_id, reply);
+          // Special: sendFile action (download config as file)
+          if (reply && reply._action === 'sendFile') {
+            const c = await genConfig(env.DB, env.ENCRYPTION_KEY, uid, reply.app);
+            if (c) {
+              await tgSendFile(env.BOT_TOKEN, cid, c.content, c.fn, `📄 ${reply.app} config`);
+              if (c.extra) await tgSendFile(env.BOT_TOKEN, cid, c.extra.content, c.extra.fn);
+            } else {
+              await tgSend(env.BOT_TOKEN, cid, { text: '❌ 暂无配置' });
+            }
+          } else if (reply) {
+            await tgEdit(env.BOT_TOKEN, cid, u.callback_query.message.message_id, reply);
+          }
           await tgAnswer(env.BOT_TOKEN, u.callback_query.id);
-        } else if (u.message?.text) {
+        }
+        // Handle file upload (document message)
+        else if (u.message?.document) {
+          const cid = u.message.chat.id, uid = String(u.message.from?.id || cid);
+          if (env.ADMIN_USER_ID && env.ADMIN_USER_ID !== uid) { await tgSend(env.BOT_TOKEN, cid, { text: '⛔ 无权限' }); return new Response('ok'); }
+          const convo = await getConvo(env.DB, uid);
+          if (convo?.state === 'cfg_upload') {
+            const content = await tgGetFile(env.BOT_TOKEN, u.message.document.file_id);
+            if (content) {
+              const app = convo.data.app;
+              const fn = u.message.document.file_name || `${app}-config`;
+              await dbSetOverride(env.DB, uid, app, content, fn);
+              await clearConvo(env.DB, uid);
+              await tgSend(env.BOT_TOKEN, cid, md(`✅ *${app} 配置已上传！*\n\n📄 ${fn}\n📏 ${content.length} 字符\n_sync agent 下次同步时生效_`));
+            } else {
+              await tgSend(env.BOT_TOKEN, cid, { text: '❌ 无法读取文件内容' });
+            }
+          } else if (convo?.state === 'skill_content') {
+            // Upload skill content as file
+            const content = await tgGetFile(env.BOT_TOKEN, u.message.document.file_id);
+            if (content) {
+              const d = convo.data;
+              const id = genId(d.name);
+              await dbInsertSkill(env.DB, { id, user_id: uid, name: d.name, content, enabled_apps: [] });
+              await clearConvo(env.DB, uid);
+              await tgSend(env.BOT_TOKEN, cid, md(`✅ *Skill 已添加！*\n\n🧩 *${d.name}*\n📏 ${content.length} 字符`));
+            } else {
+              await tgSend(env.BOT_TOKEN, cid, { text: '❌ 无法读取文件' });
+            }
+          } else {
+            await tgSend(env.BOT_TOKEN, cid, md('📤 *收到文件*\n\n要上传配置？先选择「📄 查看配置」→ 选应用 → 📤 上传替换\n要添加 Skill？先选择「🧩 Skills管理」→ ➕ 添加'));
+          }
+        }
+        else if (u.message?.text) {
           const cid = u.message.chat.id, uid = String(u.message.from?.id || cid);
           if (env.ADMIN_USER_ID && env.ADMIN_USER_ID !== uid) { await tgSend(env.BOT_TOKEN, cid, { text: '⛔ 无权限' }); return new Response('ok'); }
           const reply = await handleMessage(env, uid, u.message.text, u.message.from?.first_name);
