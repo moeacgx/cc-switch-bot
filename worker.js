@@ -30,7 +30,9 @@ CREATE INDEX IF NOT EXISTS idx_prov_cur ON providers(user_id, app_type, is_curre
 CREATE TABLE IF NOT EXISTS usage_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, provider_id TEXT, provider_name TEXT, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, recorded_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(user_id, recorded_at);
 CREATE TABLE IF NOT EXISTS settings (user_id TEXT PRIMARY KEY, api_token TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS conversations (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);`;
+CREATE TABLE IF NOT EXISTS conversations (user_id TEXT PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, enabled_apps TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id);`;
 
 // ========================== DB Helpers ==========================
 const now = () => Date.now();
@@ -53,7 +55,18 @@ async function getConvo(db, uid) { const r = await db.prepare('SELECT state,data
 async function setConvo(db, uid, state, data) { await db.prepare('INSERT INTO conversations(user_id,state,data,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET state=excluded.state,data=excluded.data,updated_at=excluded.updated_at').bind(uid, state, JSON.stringify(data), now()).run(); }
 async function clearConvo(db, uid) { await db.prepare('DELETE FROM conversations WHERE user_id=?').bind(uid).run(); }
 
+// -- Skills --
+async function dbSkills(db, uid) { return (await db.prepare('SELECT * FROM skills WHERE user_id=? ORDER BY name').bind(uid).all()).results; }
+async function dbSkill(db, uid, id) { return db.prepare('SELECT * FROM skills WHERE id=? AND user_id=?').bind(id, uid).first(); }
+async function dbInsertSkill(db, s) { const n = now(); await db.prepare('INSERT INTO skills(id,user_id,name,content,enabled_apps,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').bind(s.id, s.user_id, s.name, s.content, JSON.stringify(s.enabled_apps || []), n, n).run(); }
+async function dbUpdateSkillApps(db, uid, id, apps) { await db.prepare('UPDATE skills SET enabled_apps=?,updated_at=? WHERE id=? AND user_id=?').bind(JSON.stringify(apps), now(), id, uid).run(); }
+async function dbDeleteSkill(db, uid, id) { return (await db.prepare('DELETE FROM skills WHERE id=? AND user_id=?').bind(id, uid).run()).meta.changes > 0; }
+async function dbSkillsForApp(db, uid, app) { return (await db.prepare("SELECT * FROM skills WHERE user_id=? AND enabled_apps LIKE ? ORDER BY name").bind(uid, `%"${app}"%`).all()).results; }
+
 // ========================== Config Gen ==========================
+const ALL_APPS = ['claude', 'codex', 'gemini', 'openclaw', 'hermes'];
+const APP_ICONS = { claude: '🟣', codex: '🟢', gemini: '🔵', openclaw: '🟠', hermes: '🟤' };
+const APP_SKILL_DIRS = { claude: '~/.claude/commands', codex: '~/.codex/commands', openclaw: '~/.openclaw/commands', hermes: '~/.hermes/skills' };
 function genClaudeConfig(url, key, model, fmt, modelsJson) {
   const e = {};
   if (fmt==='openai_chat'||fmt==='openai_responses') { e.OPENAI_API_KEY=key;e.OPENAI_BASE_URL=url; }
@@ -71,7 +84,15 @@ function genClaudeConfig(url, key, model, fmt, modelsJson) {
 }
 function genCodexConfig(url, key, model, name) { const s=(name||'custom').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'')||'custom'; let t=`model_provider = "${s}"\n`; if(model) t+=`model = "${model}"\n`; t+=`\n[model_providers.${s}]\nbase_url = "${url}"\n`; return { toml: t, auth: JSON.stringify({OPENAI_API_KEY:key},null,2) }; }
 function genGeminiEnv(url, key, model) { const l=[`GEMINI_API_KEY=${key}`]; if(url)l.push(`GEMINI_BASE_URL=${url}`); if(model)l.push(`GEMINI_MODEL=${model}`); return l.sort().join('\n')+'\n'; }
-async function genConfig(db, ek, uid, app) { const p=await dbCurrent(db,uid,app); if(!p)return null; const k=await decrypt(p.api_key_encrypted,ek); switch(app){ case'claude':return{fmt:'json',fn:'settings.json',content:genClaudeConfig(p.base_url,k,p.model,p.api_format,p.models_json),extra:null}; case'codex':{const c=genCodexConfig(p.base_url,k,p.model,p.name);return{fmt:'toml',fn:'config.toml',content:c.toml,extra:{fn:'auth.json',content:c.auth}};} case'gemini':return{fmt:'env',fn:'.env',content:genGeminiEnv(p.base_url,k,p.model),extra:null}; default:return null; } }
+function genOpenClawConfig(url, key, model) { return JSON.stringify({ provider: { base_url: url, api_key: key, model: model || undefined } }, null, 2); }
+function genHermesConfig(url, key, model) { return `provider:\n  base_url: "${url}"\n  api_key: "${key}"\n${model ? `  model: "${model}"\n` : ''}`; }
+async function genConfig(db, ek, uid, app) { const p=await dbCurrent(db,uid,app); if(!p)return null; const k=await decrypt(p.api_key_encrypted,ek); switch(app){
+  case'claude':return{fmt:'json',fn:'settings.json',content:genClaudeConfig(p.base_url,k,p.model,p.api_format,p.models_json),extra:null};
+  case'codex':{const c=genCodexConfig(p.base_url,k,p.model,p.name);return{fmt:'toml',fn:'config.toml',content:c.toml,extra:{fn:'auth.json',content:c.auth}};}
+  case'gemini':return{fmt:'env',fn:'.env',content:genGeminiEnv(p.base_url,k,p.model),extra:null};
+  case'openclaw':return{fmt:'json',fn:'openclaw.json',content:genOpenClawConfig(p.base_url,k,p.model),extra:null};
+  case'hermes':return{fmt:'yaml',fn:'config.yaml',content:genHermesConfig(p.base_url,k,p.model),extra:null};
+  default:return null; } }
 
 // ========================== Health Check ==========================
 async function checkProv(db, ek, uid, pid) {
@@ -109,7 +130,8 @@ function replyKb() {
       ['➕ 添加供应商', '📋 供应商列表'],
       ['🔄 切换供应商', '✅ 当前状态'],
       ['🔍 连通性测试', '📄 查看配置'],
-      ['📊 用量统计',  '🔑 API Token'],
+      ['🧩 Skills管理', '📊 用量统计'],
+      ['🔑 API Token'],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -124,18 +146,22 @@ const REPLY_KB_MAP = {
   '✅ 当前状态':   'current',
   '🔍 连通性测试': 'test',
   '📄 查看配置':   'config',
+  '🧩 Skills管理': 'skills',
   '📊 用量统计':   'stats',
   '🔑 API Token': 'token',
 };
 
 function appTypeKb(action) {
-  return kb([[btn('🟣 Claude', `${action}:claude`), btn('🟢 Codex', `${action}:codex`), btn('🔵 Gemini', `${action}:gemini`)]]);
+  return kb([
+    [btn('🟣 Claude', `${action}:claude`), btn('🟢 Codex', `${action}:codex`), btn('🔵 Gemini', `${action}:gemini`)],
+    [btn('🟠 OpenClaw', `${action}:openclaw`), btn('🟤 Hermes', `${action}:hermes`)],
+  ]);
 }
 
 function providerListKb(ps) {
   const rows = [];
   for (const p of ps) {
-    const icon = p.app_type === 'claude' ? '🟣' : p.app_type === 'codex' ? '🟢' : '🔵';
+    const icon = APP_ICONS[p.app_type] || '⚪';
     const cur = p.is_current ? ' ✅' : '';
     rows.push([btn(`${icon} ${p.name}${cur}`, `pinfo:${p.id}`)]);
   }
@@ -489,6 +515,105 @@ async function handleSetSlot(env, uid, provId, slot, modelIdx) {
   );
 }
 
+// ========================== Skills Management ==========================
+
+function skillListKb(skills) {
+  const rows = skills.map(s => {
+    const apps = JSON.parse(s.enabled_apps || '[]');
+    const badges = apps.map(a => APP_ICONS[a] || a).join('') || '⬜';
+    return [btn(`${badges} ${s.name}`, `skinfo:${s.id}`)];
+  });
+  rows.push([btn('➕ 添加 Skill', 'skadd')]);
+  return kb(rows);
+}
+
+function skillActionKb(id, enabledApps) {
+  const rows = [];
+  // Toggle per app
+  for (const app of ALL_APPS) {
+    if (!APP_SKILL_DIRS[app]) continue; // skip apps without skill dirs
+    const on = enabledApps.includes(app);
+    const icon = APP_ICONS[app] || '⚪';
+    rows.push([btn(`${on ? '✅' : '⬜'} ${icon} ${app}`, `sktoggle:${id}:${app}`)]);
+  }
+  rows.push([btn('📄 查看内容', `skview:${id}`), btn('🗑 删除', `skdelc:${id}`)]);
+  return kb(rows);
+}
+
+async function showSkills(env, uid) {
+  const skills = await dbSkills(env.DB, uid);
+  if (!skills.length) return md('🧩 *Skills 管理*\n\n_还没有 Skill_\n\n添加方式：\n1. 点下方 ➕ 添加 Skill\n2. 直接发送 .md 文件\n3. 发送文本（第一行为名称）', kb([[btn('➕ 添加 Skill', 'skadd')]]));
+  return md(`🧩 *Skills 管理*\n\n共 *${skills.length}* 个 Skill\n_图标=已启用的应用，点击管理_`, skillListKb(skills));
+}
+
+async function showSkillInfo(env, uid, id) {
+  const s = await dbSkill(env.DB, uid, id);
+  if (!s) return md('❌ Skill 不存在');
+  const apps = JSON.parse(s.enabled_apps || '[]');
+  const appText = apps.length ? apps.map(a => `${APP_ICONS[a] || ''} ${a}`).join(', ') : '_无_';
+  const preview = s.content.length > 200 ? s.content.slice(0, 200) + '...' : s.content;
+  return md(
+    `🧩 *${s.name}*\n\n` +
+    `📱 启用应用: ${appText}\n` +
+    `📏 长度: ${s.content.length} 字符\n\n` +
+    `预览:\n\`\`\`\n${preview}\n\`\`\`\n\n` +
+    `_点击应用图标开关启用状态_`,
+    skillActionKb(id, apps)
+  );
+}
+
+async function handleSkillToggle(env, uid, id, app) {
+  const s = await dbSkill(env.DB, uid, id);
+  if (!s) return md('❌ Skill 不存在');
+  const apps = JSON.parse(s.enabled_apps || '[]');
+  const idx = apps.indexOf(app);
+  if (idx >= 0) apps.splice(idx, 1); else apps.push(app);
+  await dbUpdateSkillApps(env.DB, uid, id, apps);
+  const icon = APP_ICONS[app] || '';
+  const action = idx >= 0 ? '已禁用' : '已启用';
+  // Show updated info
+  const appText = apps.length ? apps.map(a => `${APP_ICONS[a] || ''} ${a}`).join(', ') : '_无_';
+  return md(
+    `🧩 *${s.name}*\n\n${icon} ${app} ${action}\n\n📱 启用应用: ${appText}`,
+    skillActionKb(id, apps)
+  );
+}
+
+async function showSkillContent(env, uid, id) {
+  const s = await dbSkill(env.DB, uid, id);
+  if (!s) return md('❌ Skill 不存在');
+  const content = s.content.length > 3500 ? s.content.slice(0, 3500) + '\n...(截断)' : s.content;
+  return md(`🧩 *${s.name}*\n\n\`\`\`\n${content}\n\`\`\``);
+}
+
+async function startSkillAdd(env, uid) {
+  await setConvo(env.DB, uid, 'skill_name', {});
+  return md('🧩 *添加 Skill*\n\n🔸 输入 Skill 名称\n\n_例: code-review, auto-test_', cancelKb());
+}
+
+async function handleSkillAddText(env, uid, text) {
+  const convo = await getConvo(env.DB, uid);
+  if (!convo) return null;
+
+  if (convo.state === 'skill_name') {
+    const name = text.trim();
+    if (!name) return md('❌ 名称不能为空', cancelKb());
+    await setConvo(env.DB, uid, 'skill_content', { name });
+    return md(`🧩 *添加 Skill*\n\n📛 名称: *${name}*\n\n🔸 输入 Skill 内容\n\n_直接发送 Markdown 文本，或发送 .md 文件_`, cancelKb());
+  }
+
+  if (convo.state === 'skill_content') {
+    const content = text.trim();
+    if (!content) return md('❌ 内容不能为空', cancelKb());
+    const d = convo.data;
+    const id = genId(d.name);
+    await dbInsertSkill(env.DB, { id, user_id: uid, name: d.name, content, enabled_apps: [] });
+    await clearConvo(env.DB, uid);
+    return md(`✅ *Skill 已添加！*\n\n🧩 *${d.name}*\n📏 ${content.length} 字符\n\n_去 Skills 管理启用到对应应用_`);
+  }
+  return null;
+}
+
 async function showSwitch(env, uid) {
   const ps = await dbProviders(env.DB, uid);
   if (!ps.length) return md('🔄 *切换供应商*\n\n_还没有供应商_');
@@ -609,6 +734,14 @@ async function handleCallback(env, uid, data) {
   if (action === 'delc') { const p = await dbProvider(env.DB, uid, param); return p ? md(`⚠️ *确认删除？*\n\n🗑 ${p.name} [${p.app_type}]\n\n_不可恢复_`, confirmDeleteKb(param)) : md('未找到'); }
   if (action === 'dele') { await dbDeleteProv(env.DB, uid, param); return md('✅ *已删除*'); }
 
+  // Skills
+  if (action === 'skadd') return await startSkillAdd(env, uid);
+  if (action === 'skinfo') return await showSkillInfo(env, uid, param);
+  if (action === 'skview') return await showSkillContent(env, uid, param);
+  if (action === 'sktoggle') { const [sid, app] = param.split(':'); return await handleSkillToggle(env, uid, sid, app); }
+  if (action === 'skdelc') { const s = await dbSkill(env.DB, uid, param); return s ? md(`⚠️ *删除 Skill？*\n\n🧩 ${s.name}\n_不可恢复_`, kb([[btn('✅ 确认删除', `skdele:${param}`), btn('❌ 取消', 'cancel')]])) : md('未找到'); }
+  if (action === 'skdele') { await dbDeleteSkill(env.DB, uid, param); return md('✅ *Skill 已删除*'); }
+
   // Config / Stats / Token
   if (action === 'cfg') return await showConfig(env, uid, param);
   if (action === 'stats') return await showStats(env, uid, parseInt(param));
@@ -621,16 +754,23 @@ async function handleCallback(env, uid, data) {
 // ========================== Message Handler ==========================
 
 async function handleMessage(env, uid, text, firstName) {
-  // 1. Check ongoing conversation flow (add provider steps)
+  // 1. Check ongoing conversation flows
   const convo = await getConvo(env.DB, uid);
-  if (convo && convo.state.startsWith('add_')) {
-    // If user taps a bottom keyboard button mid-flow, cancel the flow
+  if (convo && (convo.state.startsWith('add_') || convo.state.startsWith('skill_'))) {
     if (REPLY_KB_MAP[text]) {
       await clearConvo(env.DB, uid);
       // Fall through to handle the button
     } else {
-      const result = await handleAddText(env, uid, text);
-      if (result) return result;
+      // Try add-provider flow
+      if (convo.state.startsWith('add_')) {
+        const result = await handleAddText(env, uid, text);
+        if (result) return result;
+      }
+      // Try skill-add flow
+      if (convo.state.startsWith('skill_')) {
+        const result = await handleSkillAddText(env, uid, text);
+        if (result) return result;
+      }
     }
   }
 
@@ -646,6 +786,7 @@ async function handleMessage(env, uid, text, firstName) {
       case 'current': return await showCurrent(env, uid);
       case 'test':    return await showTest(env, uid, null);
       case 'config':  return await showConfig(env, uid, null);
+      case 'skills':  return await showSkills(env, uid);
       case 'stats':   return await showStats(env, uid, null);
       case 'token':   return await showToken(env, uid);
     }
@@ -690,6 +831,11 @@ async function handleApi(req, env, path) {
   if (path === '/api/current') { const p = await dbCurrent(env.DB, uid, url.searchParams.get('app') || 'claude'); return p ? json({ provider: p }) : json({ error: 'No active provider' }, 404); }
   if (path === '/api/stats' && req.method === 'POST') { try { const b = await req.json(); await dbInsertUsage(env.DB, uid, b.provider_id||null, b.provider_name||null, b.input_tokens||0, b.output_tokens||0); return json({ ok: true }); } catch { return json({ error: 'Bad body' }, 400); } }
   if (path === '/api/stats') { const d = parseInt(url.searchParams.get('days')||'30')||30, s = await dbUsageSummary(env.DB, uid, d); return json({ totalInput: s.ti, totalOutput: s.to2, requests: s.cnt }); }
+  if (path === '/api/skills') {
+    const app = url.searchParams.get('app');
+    const skills = app ? await dbSkillsForApp(env.DB, uid, app) : await dbSkills(env.DB, uid);
+    return json({ skills: skills.map(s => ({ id: s.id, name: s.name, content: s.content, enabled_apps: JSON.parse(s.enabled_apps || '[]') })) });
+  }
   return json({ error: 'Not found' }, 404);
 }
 function json(d, s = 200) { return new Response(JSON.stringify(d), { status: s, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }); }
@@ -726,7 +872,32 @@ for app in \${CC_SWITCH_BOT_APPS:-claude}; do case "\$app" in
 claude) [ -d ~/.claude ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=claude&format=raw") && aw ~/.claude/settings.json "\$c"; } || true;;
 codex) d="\${CODEX_HOME:-~/.codex}"; [ -d "\$d" ] && { r=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=codex") && { t=\$(echo "\$r"|jq -r .content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['content'])" 2>/dev/null) && aw "\$d/config.toml" "\$t"; a=\$(echo "\$r"|jq -r .extraFile.content 2>/dev/null||python3 -c "import sys,json;print(json.load(sys.stdin)['extraFile']['content'])" 2>/dev/null) && aw "\$d/auth.json" "\$a"; }; } || true;;
 gemini) [ -d ~/.gemini ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=gemini&format=raw") && aw ~/.gemini/.env "\$c"; } || true;;
+openclaw) [ -d ~/.openclaw ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=openclaw&format=raw") && aw ~/.openclaw/openclaw.json "\$c"; } || true;;
+hermes) [ -d ~/.hermes ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=hermes&format=raw") && aw ~/.hermes/config.yaml "\$c"; } || true;;
 esac; done
+# Sync skills per app
+for app in \${CC_SWITCH_BOT_APPS:-claude}; do
+  case "\$app" in
+    claude) sd=~/.claude/commands;; codex) sd="\${CODEX_HOME:-~/.codex}/commands";; openclaw) sd=~/.openclaw/commands;; hermes) sd=~/.hermes/skills;; *) continue;; esac
+  r=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/skills?app=\$app" 2>/dev/null) || continue
+  if command -v jq &>/dev/null; then
+    cnt=\$(echo "\$r"|jq '.skills|length'); [ "\$cnt" = "0" ] || [ -z "\$cnt" ] && continue
+    mkdir -p "\$sd"
+    echo "\$r"|jq -r '.skills[]|"\\(.name)\\t\\(.content)"' 2>/dev/null | while IFS=\$'\\t' read -r sn sc; do aw "\$sd/\${sn}.md" "\$sc"; done
+  elif command -v python3 &>/dev/null; then
+    python3 -c "
+import sys,json,os
+d=json.load(sys.stdin)
+for s in d.get('skills',[]):
+    os.makedirs('\$sd',exist_ok=True)
+    p=os.path.join('\$sd',s['name']+'.md')
+    c=s['content']
+    if os.path.exists(p) and open(p).read()==c: continue
+    open(p,'w').write(c)
+    print(f'[{__import__(\"datetime\").datetime.now():%H:%M:%S}] {p} updated')
+" <<< "\$r" 2>/dev/null
+  fi
+done
 SEOF
 chmod +x "\$SYNC_SCRIPT"; ok "sync.sh 安装完成"
 crontab -l 2>/dev/null | grep -v cc-switch-bot-sync > /tmp/.cc-cron || true
