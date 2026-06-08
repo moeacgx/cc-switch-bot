@@ -139,7 +139,20 @@ async function checkProv(db, ek, uid, pid) {
 }
 async function streamTest(app, base, key, model, fmt) {
   const b = base.replace(/\/$/,''); let url, headers, body;
-  if (app==='claude') { url=b+'/v1/messages'; headers={'Content-Type':'application/json','anthropic-version':'2023-06-01'}; if(key.startsWith('sk-ant-'))headers['x-api-key']=key; else{headers['Authorization']='Bearer '+key;headers['x-api-key']=key;} body=JSON.stringify({model:model||'claude-sonnet-4-20250514',max_tokens:1,stream:true,messages:[{role:'user',content:'Hi'}]}); }
+  if (app==='claude') {
+    url=b+'/v1/messages';
+    headers={
+      'Content-Type':'application/json',
+      'anthropic-version':'2023-06-01',
+      'anthropic-beta':'claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01',
+      'anthropic-dangerous-direct-browser-access':'true',
+      'User-Agent':'claude-cli/2.1.168 (external, sdk-cli)',
+      'X-App':'cli',
+    };
+    if(key.startsWith('sk-ant-')) headers['x-api-key']=key;
+    else { headers['Authorization']='Bearer '+key; headers['x-api-key']=key; }
+    body=JSON.stringify({model:model||'claude-sonnet-4-20250514',max_tokens:1,stream:true,messages:[{role:'user',content:'Hi'}]});
+  }
   else if (app==='codex' || app==='openclaw' || app==='hermes') { url=b+'/v1/responses'; headers={'Content-Type':'application/json','Authorization':'Bearer '+key,'Accept':'text/event-stream'}; body=JSON.stringify({model:model||'gpt-4.1',stream:true,input:[{role:'user',content:'Hi'}]}); }
   else { const m=model||'gemini-2.0-flash'; url=b+`/v1beta/models/${m}:streamGenerateContent?alt=sse`; headers={'Content-Type':'application/json','x-goog-api-key':key}; body=JSON.stringify({contents:[{role:'user',parts:[{text:'Hi'}]}]}); }
   const ctrl=new AbortController(); const timer=setTimeout(()=>ctrl.abort(),15000); const start=performance.now();
@@ -272,7 +285,12 @@ async function fetchModels(baseUrl, apiKey, appType) {
     } else {
       url = `${base}/v1/models`;
       headers = { 'Authorization': `Bearer ${apiKey}` };
-      if (appType === 'claude') headers['x-api-key'] = apiKey;
+      if (appType === 'claude') {
+        headers['x-api-key'] = apiKey;
+        headers['User-Agent'] = 'claude-cli/2.1.168 (external, sdk-cli)';
+        headers['X-App'] = 'cli';
+        headers['anthropic-version'] = '2023-06-01';
+      }
     }
     const resp = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
     if (!resp.ok) return [];
