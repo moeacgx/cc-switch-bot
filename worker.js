@@ -331,9 +331,6 @@ async function startModelsFetch(env, uid, provId) {
   // Save models to this provider
   await dbUpdateProvModels(env.DB, uid, provId, JSON.stringify(models));
 
-  // Store in convo for the setmodel callback to reference
-  await setConvo(env.DB, uid, 'pick_model', { provId, models });
-
   return md(
     `📥 *${p.name}*\n\n发现 *${models.length}* 个可用模型\n当前: ${p.model || '默认'}\n\n_点击模型切换为当前使用的模型_`,
     modelPickKb(models, p.model, provId)
@@ -346,8 +343,6 @@ async function showModelPicker(env, uid, provId) {
   const models = p.models_json ? JSON.parse(p.models_json) : [];
   if (models.length === 0) return md('📥 还没有模型列表，先点 *获取模型*', providerActionKb(provId, false));
 
-  await setConvo(env.DB, uid, 'pick_model', { provId, models });
-
   return md(
     `🔀 *${p.name} — 切换模型*\n\n当前: *${p.model || '默认'}*\n\n_点击要使用的模型_`,
     modelPickKb(models, p.model, provId)
@@ -355,16 +350,15 @@ async function showModelPicker(env, uid, provId) {
 }
 
 async function handleSetModel(env, uid, provId, modelIdx) {
-  const convo = await getConvo(env.DB, uid);
-  if (!convo || convo.state !== 'pick_model') return md('❌ 操作已过期');
-  const models = convo.data.models;
+  // Read models directly from DB, no convo dependency
+  const p = await dbProvider(env.DB, uid, provId);
+  if (!p) return md('❌ 供应商不存在');
+  const models = p.models_json ? JSON.parse(p.models_json) : [];
   const model = models[parseInt(modelIdx)];
-  if (!model) return md('❌ 无效模型');
+  if (!model) return md('❌ 无效模型 (索引越界，请重新获取模型列表)');
 
   await dbUpdateProvModel(env.DB, uid, provId, model);
-  await clearConvo(env.DB, uid);
 
-  const p = await dbProvider(env.DB, uid, provId);
   const icon = p.app_type === 'claude' ? '🟣' : p.app_type === 'codex' ? '🟢' : '🔵';
   return md(`✅ *模型已切换！*\n\n${icon} *${p.name}*\n🤖 → *${model}*\n\n_同步 Agent 将在下次拉取时生效_`);
 }
