@@ -1007,7 +1007,7 @@ openclaw) [ -d ~/.openclaw ] && { c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/
 hermes) if [ -d ~/.hermes ]; then c=\$(curl -sf -H "\$A" "\${CC_SWITCH_BOT_API}/api/config?app=hermes&format=raw") || true; if [ -n "\$c" ]; then aw ~/.hermes/config.yaml "\$c"; if [ -d ~/.hermes/profiles ]; then for pd in ~/.hermes/profiles/*/; do [ -d "\$pd" ] && aw "\${pd}config.yaml" "\$c"; done; fi; fi; fi;;
 esac; done
 # Failover check
-curl -sf -X POST -H "$A" "${CC_SWITCH_BOT_API}/api/failover-check" >/dev/null 2>&1 || true
+curl -sf -X POST -H "\$A" "\${CC_SWITCH_BOT_API}/api/failover-check" >/dev/null 2>&1 || true
 # Sync skills per app
 for app in \${CC_SWITCH_BOT_APPS:-claude}; do
   case "\$app" in
