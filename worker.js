@@ -86,14 +86,31 @@ function maskKey(k) { if (!k || k.length < 8) return '***'; return k.slice(0, 4)
 
 // ========================== UI: Keyboards ==========================
 
-function mainMenuKb() {
-  return kb([
-    [btn('➕ 添加供应商', 'menu:add'), btn('📋 供应商列表', 'menu:list')],
-    [btn('🔄 切换供应商', 'menu:switch'), btn('✅ 当前供应商', 'menu:current')],
-    [btn('🔍 连通性测试', 'menu:test'), btn('📄 查看配置', 'menu:config')],
-    [btn('📊 用量统计', 'menu:stats'), btn('🔑 API Token', 'menu:token')],
-  ]);
+// Reply Keyboard — 常驻在输入框下方
+function replyKb() {
+  return {
+    keyboard: [
+      ['➕ 添加供应商', '📋 供应商列表'],
+      ['🔄 切换供应商', '✅ 当前状态'],
+      ['🔍 连通性测试', '📄 查看配置'],
+      ['📊 用量统计',  '🔑 API Token'],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 }
+
+// Map reply keyboard text → action
+const REPLY_KB_MAP = {
+  '➕ 添加供应商': 'add',
+  '📋 供应商列表': 'list',
+  '🔄 切换供应商': 'switch',
+  '✅ 当前状态':   'current',
+  '🔍 连通性测试': 'test',
+  '📄 查看配置':   'config',
+  '📊 用量统计':   'stats',
+  '🔑 API Token': 'token',
+};
 
 function appTypeKb(action) {
   return kb([
@@ -135,13 +152,14 @@ function cancelKb() {
 // ========================== Main Menu ==========================
 
 function mainMenuMsg(name) {
-  return md(
-    `🤖 *CC-Switch Bot*\n\n` +
-    `欢迎${name ? ', *' + name + '*' : ''}！\n\n` +
-    `在 Telegram 里管理你所有服务器的\nClaude / Codex / Gemini 供应商配置。\n\n` +
-    `👇 选择操作：`,
-    mainMenuKb()
-  );
+  return {
+    text: `🤖 *CC-Switch Bot*\n\n` +
+      `欢迎${name ? ', *' + name + '*' : ''}！\n\n` +
+      `在 Telegram 里管理你所有服务器的\nClaude / Codex / Gemini 供应商配置。\n\n` +
+      `👇 用下方键盘操作：`,
+    parse_mode: 'Markdown',
+    reply_markup: replyKb(),
+  };
 }
 
 // ========================== Conversation Flow: Add Provider ==========================
@@ -418,24 +436,53 @@ async function handleCallback(env, uid, data) {
 // ========================== Message Handler ==========================
 
 async function handleMessage(env, uid, text, firstName) {
-  // Check if there's an ongoing conversation
+  // 1. Check ongoing conversation flow (add provider steps)
   const convo = await getConvo(env.DB, uid);
   if (convo && convo.state.startsWith('add_')) {
-    const result = await handleAddText(env, uid, text);
-    if (result) return result;
+    // If user taps a bottom keyboard button mid-flow, cancel the flow
+    if (REPLY_KB_MAP[text]) {
+      await clearConvo(env.DB, uid);
+      // Fall through to handle the button
+    } else {
+      const result = await handleAddText(env, uid, text);
+      if (result) return result;
+    }
   }
 
-  // Commands
+  // 2. Reply Keyboard buttons (bottom persistent keyboard)
+  const menuAction = REPLY_KB_MAP[text];
+  if (menuAction) {
+    // Ensure registered
+    if (!(await dbSettings(env.DB, uid))) { const t = genToken(); await dbUpsertSettings(env.DB, uid, t); }
+    switch (menuAction) {
+      case 'add':     return await startAddFlow(env, uid);
+      case 'list':    return await showList(env, uid);
+      case 'switch':  return await showSwitch(env, uid);
+      case 'current': return await showCurrent(env, uid);
+      case 'test':    return await showTest(env, uid, null);
+      case 'config':  return await showConfig(env, uid, null);
+      case 'stats':   return await showStats(env, uid, null);
+      case 'token':   return await showToken(env, uid);
+    }
+  }
+
+  // 3. Slash commands
   if (text === '/start' || text === '/menu') {
     await clearConvo(env.DB, uid);
-    let s = await dbSettings(env.DB, uid);
-    if (!s) { const t = genToken(); await dbUpsertSettings(env.DB, uid, t); }
+    if (!(await dbSettings(env.DB, uid))) { const t = genToken(); await dbUpsertSettings(env.DB, uid, t); }
     return mainMenuMsg(firstName);
   }
-  if (text === '/help') return md(`📖 *帮助*\n\n发 /start 打开主菜单\n所有操作都通过按钮完成！\n\n*一键安装同步 Agent:*\n\`curl -fsSL <Worker地址>/install.sh | bash\``, kb([[btn('🏠 主菜单', 'menu:home')]]));
+  if (text === '/help') return {
+    text: `📖 *帮助*\n\n用输入框下方的键盘操作即可！\n\n*一键安装同步 Agent:*\n\`curl -fsSL <Worker地址>/install.sh | bash\``,
+    parse_mode: 'Markdown',
+    reply_markup: replyKb(),
+  };
 
-  // Fallback: show menu
-  return md('👇 点击按钮操作，或发 /start 打开主菜单', mainMenuKb());
+  // 4. Fallback
+  return {
+    text: '👇 用下方键盘操作，或发 /start 重新打开',
+    reply_markup: replyKb(),
+  };
 }
 
 // ========================== REST API ==========================
@@ -517,7 +564,18 @@ export default {
     if (path === '/health') return json({ ok: true });
     if (path === '/install.sh') return new Response(getInstallScript(url.origin), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     if (path === '/init-db') { try { for (const s of DB_SCHEMA.split(';').map(x=>x.trim()).filter(Boolean)) await env.DB.prepare(s+';').run(); return json({ ok:true, msg:'Tables created' }); } catch(e) { return json({ ok:false, error:e.message },500); } }
-    if (path === '/setup') { const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook?url=${encodeURIComponent(url.origin+'/webhook')}`); return new Response(await r.text(), { headers:{'Content-Type':'application/json'} }); }
+    if (path === '/setup') {
+      const tg = (m, b) => fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${m}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b) });
+      const [whRes, cmdRes] = await Promise.all([
+        tg('setWebhook', { url: url.origin + '/webhook' }),
+        tg('setMyCommands', { commands: [
+          { command: 'start', description: '🏠 打开主菜单' },
+          { command: 'help', description: '📖 帮助' },
+        ]}),
+      ]);
+      const whResult = await whRes.json();
+      return new Response(JSON.stringify({ webhook: whResult, commands: 'set' }, null, 2), { headers:{'Content-Type':'application/json'} });
+    }
 
     if (path === '/webhook' && request.method === 'POST') {
       try {
