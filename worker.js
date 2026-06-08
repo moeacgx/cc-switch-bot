@@ -129,7 +129,7 @@ function providerListKb(ps) {
 function providerActionKb(id) {
   return kb([
     [btn('🔄 切换到此', `switch:${id}`), btn('🔍 测试连通', `test:${id}`)],
-    [btn('🗑 删除', `delc:${id}`)],
+    [btn('📥 获取模型', `models:${id}`), btn('🗑 删除', `delc:${id}`)],
   ]);
 }
 
@@ -380,6 +380,90 @@ async function showProviderInfo(env, uid, id) {
   );
 }
 
+// ========================== Provider Model Browse ==========================
+
+// Build model grid keyboard for provider-scoped browse (prefix pmsel to avoid collision with add flow)
+function provModelSelectKb(models, selected, provId) {
+  const rows = [];
+  for (let i = 0; i < models.length; i += 2) {
+    const row = [];
+    for (let j = i; j < i + 2 && j < models.length; j++) {
+      const sel = selected.includes(j);
+      row.push(btn(`${sel ? '✅' : '⬜'} ${models[j].slice(0, 24)}`, `pmsel:${j}`));
+    }
+    rows.push(row);
+  }
+  const allSel = selected.length === models.length;
+  rows.push([btn(allSel ? '取消全选' : '🔘 全选', 'pmselall:0'), btn(`✅ 批量添加 (${selected.length})`, 'pmselok:0')]);
+  return kb(rows);
+}
+
+async function startModelsFetch(env, uid, provId) {
+  const p = await dbProvider(env.DB, uid, provId);
+  if (!p) return md('❌ 供应商不存在');
+  const apiKey = await decrypt(p.api_key_encrypted, env.ENCRYPTION_KEY);
+  const models = await fetchModels(p.base_url, apiKey, p.app_type);
+
+  if (models.length === 0) return md(`📥 *获取模型*\n\n未能从 \`${p.base_url}\` 获取到模型列表\n\n_可能该 API 不支持 /v1/models 端点_`, providerActionKb(provId));
+
+  // Store in conversation state
+  await setConvo(env.DB, uid, 'prov_models', { provId, provName: p.name, app: p.app_type, fmt: p.api_format, url: p.base_url, encKey: p.api_key_encrypted, models, selected: [] });
+
+  return md(
+    `📥 *${p.name} 模型列表*\n\n发现 *${models.length}* 个模型\n_选择要批量添加为独立供应商的模型_`,
+    provModelSelectKb(models, [], provId)
+  );
+}
+
+async function handleProvModelCallback(env, uid, action, param) {
+  const convo = await getConvo(env.DB, uid);
+  if (!convo || convo.state !== 'prov_models') return md('❌ 操作已过期');
+  const d = convo.data;
+
+  if (action === 'pmsel') {
+    const idx = parseInt(param);
+    const pos = d.selected.indexOf(idx);
+    if (pos >= 0) d.selected.splice(pos, 1); else d.selected.push(idx);
+    await setConvo(env.DB, uid, 'prov_models', d);
+    return md(
+      `📥 *${d.provName} 模型列表*\n\n已选 *${d.selected.length}* / ${d.models.length} 个模型`,
+      provModelSelectKb(d.models, d.selected, d.provId)
+    );
+  }
+
+  if (action === 'pmselall') {
+    d.selected = d.selected.length === d.models.length ? [] : d.models.map((_, i) => i);
+    await setConvo(env.DB, uid, 'prov_models', d);
+    return md(
+      `📥 *${d.provName} 模型列表*\n\n已选 *${d.selected.length}* / ${d.models.length} 个模型`,
+      provModelSelectKb(d.models, d.selected, d.provId)
+    );
+  }
+
+  if (action === 'pmselok') {
+    if (d.selected.length === 0) return md('⚠️ 请至少选择一个模型', provModelSelectKb(d.models, d.selected, d.provId));
+
+    const selectedModels = d.selected.map(i => d.models[i]);
+    await clearConvo(env.DB, uid);
+
+    // Create a provider for each selected model
+    let count = 0;
+    const icon = d.app === 'claude' ? '🟣' : d.app === 'codex' ? '🟢' : '🔵';
+    let t = '';
+    for (const model of selectedModels) {
+      const name = `${d.provName} (${model})`;
+      const id = genId(d.provName + '-' + model.replace(/[^a-z0-9]/gi, '').slice(0, 12));
+      await dbInsertProv(env.DB, { id, user_id: uid, name, app_type: d.app, base_url: d.url, api_key_encrypted: d.encKey, model, api_format: d.fmt, is_current: 0, notes: null });
+      t += `${icon} ${name}\n`;
+      count++;
+    }
+
+    return md(`✅ *已添加 ${count} 个供应商！*\n\n${t}`);
+  }
+
+  return null;
+}
+
 async function showSwitch(env, uid) {
   const ps = await dbProviders(env.DB, uid);
   if (!ps.length) return md('🔄 *切换供应商*\n\n_还没有供应商_');
@@ -488,8 +572,12 @@ async function handleCallback(env, uid, data) {
   if (action === 'pinfo') return await showProviderInfo(env, uid, param);
   if (action === 'switch') return await doSwitch(env, uid, param);
   if (action === 'test') return await showTest(env, uid, param);
+  if (action === 'models') return await startModelsFetch(env, uid, param);
   if (action === 'delc') { const p = await dbProvider(env.DB, uid, param); return p ? md(`⚠️ *确认删除？*\n\n🗑 ${p.name} [${p.app_type}]\n\n_不可恢复_`, confirmDeleteKb(param)) : md('未找到'); }
   if (action === 'dele') { await dbDeleteProv(env.DB, uid, param); return md('✅ *已删除*'); }
+
+  // Model browse from provider detail (reuses msel/mselall/mselok/mselskip)
+  if (['pmsel','pmselall','pmselok'].includes(action)) return await handleProvModelCallback(env, uid, action, param);
 
   // Config / Stats / Token
   if (action === 'cfg') return await showConfig(env, uid, param);
