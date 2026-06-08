@@ -54,10 +54,28 @@ async function setConvo(db, uid, state, data) { await db.prepare('INSERT INTO co
 async function clearConvo(db, uid) { await db.prepare('DELETE FROM conversations WHERE user_id=?').bind(uid).run(); }
 
 // ========================== Config Gen ==========================
-function genClaudeConfig(url, key, model, fmt) { const e = {}; if (fmt==='openai_chat'||fmt==='openai_responses') { e.OPENAI_API_KEY=key;e.OPENAI_BASE_URL=url; } else if (fmt==='gemini_native') { e.GOOGLE_API_KEY=key;e.GEMINI_BASE_URL=url; } else { e[key.startsWith('sk-ant-')?'ANTHROPIC_API_KEY':'ANTHROPIC_AUTH_TOKEN']=key;e.ANTHROPIC_BASE_URL=url; } if (model&&(!fmt||fmt==='anthropic')) e.ANTHROPIC_DEFAULT_SONNET_MODEL=model; return JSON.stringify({env:e},null,2); }
+function genClaudeConfig(url, key, model, fmt, modelsJson) {
+  const e = {};
+  if (fmt==='openai_chat'||fmt==='openai_responses') { e.OPENAI_API_KEY=key;e.OPENAI_BASE_URL=url; }
+  else if (fmt==='gemini_native') { e.GOOGLE_API_KEY=key;e.GEMINI_BASE_URL=url; }
+  else { e[key.startsWith('sk-ant-')?'ANTHROPIC_API_KEY':'ANTHROPIC_AUTH_TOKEN']=key;e.ANTHROPIC_BASE_URL=url; }
+
+  // Claude uses 3 model slots: Sonnet, Haiku, Opus — auto-map from available models
+  if (!fmt || fmt === 'anthropic') {
+    const models = modelsJson ? JSON.parse(modelsJson) : [];
+    const find = (kw) => models.find(m => m.toLowerCase().includes(kw));
+    const sonnet = find('sonnet') || model;
+    const haiku = find('haiku');
+    const opus = find('opus');
+    if (sonnet) e.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;
+    if (haiku) e.ANTHROPIC_DEFAULT_HAIKU_MODEL = haiku;
+    if (opus) e.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
+  }
+  return JSON.stringify({env:e},null,2);
+}
 function genCodexConfig(url, key, model, name) { const s=(name||'custom').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'')||'custom'; let t=`model_provider = "${s}"\n`; if(model) t+=`model = "${model}"\n`; t+=`\n[model_providers.${s}]\nbase_url = "${url}"\n`; return { toml: t, auth: JSON.stringify({OPENAI_API_KEY:key},null,2) }; }
 function genGeminiEnv(url, key, model) { const l=[`GEMINI_API_KEY=${key}`]; if(url)l.push(`GEMINI_BASE_URL=${url}`); if(model)l.push(`GEMINI_MODEL=${model}`); return l.sort().join('\n')+'\n'; }
-async function genConfig(db, ek, uid, app) { const p=await dbCurrent(db,uid,app); if(!p)return null; const k=await decrypt(p.api_key_encrypted,ek); switch(app){ case'claude':return{fmt:'json',fn:'settings.json',content:genClaudeConfig(p.base_url,k,p.model,p.api_format),extra:null}; case'codex':{const c=genCodexConfig(p.base_url,k,p.model,p.name);return{fmt:'toml',fn:'config.toml',content:c.toml,extra:{fn:'auth.json',content:c.auth}};} case'gemini':return{fmt:'env',fn:'.env',content:genGeminiEnv(p.base_url,k,p.model),extra:null}; default:return null; } }
+async function genConfig(db, ek, uid, app) { const p=await dbCurrent(db,uid,app); if(!p)return null; const k=await decrypt(p.api_key_encrypted,ek); switch(app){ case'claude':return{fmt:'json',fn:'settings.json',content:genClaudeConfig(p.base_url,k,p.model,p.api_format,p.models_json),extra:null}; case'codex':{const c=genCodexConfig(p.base_url,k,p.model,p.name);return{fmt:'toml',fn:'config.toml',content:c.toml,extra:{fn:'auth.json',content:c.auth}};} case'gemini':return{fmt:'env',fn:'.env',content:genGeminiEnv(p.base_url,k,p.model),extra:null}; default:return null; } }
 
 // ========================== Health Check ==========================
 async function checkProv(db, ek, uid, pid) {
@@ -456,7 +474,10 @@ async function resetToken(env, uid) {
 // ========================== Callback Router ==========================
 
 async function handleCallback(env, uid, data) {
-  const [action, param] = data.split(':', 2);
+  // Split only on first colon: "setmodel:provId:3" → action="setmodel", param="provId:3"
+  const colonIdx = data.indexOf(':');
+  const action = colonIdx >= 0 ? data.slice(0, colonIdx) : data;
+  const param = colonIdx >= 0 ? data.slice(colonIdx + 1) : '';
 
   if (action === 'cancel') { await clearConvo(env.DB, uid); return md('❌ 已取消'); }
 
