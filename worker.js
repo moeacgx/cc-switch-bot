@@ -84,7 +84,7 @@ function genClaudeConfig(url, key, model, fmt, modelsJson) {
 }
 function genCodexConfig(url, key, model, name) { const s=(name||'custom').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'')||'custom'; let t=`model_provider = "${s}"\n`; if(model) t+=`model = "${model}"\n`; t+=`\n[model_providers.${s}]\nbase_url = "${url}"\n`; return { toml: t, auth: JSON.stringify({OPENAI_API_KEY:key},null,2) }; }
 function genGeminiEnv(url, key, model) { const l=[`GEMINI_API_KEY=${key}`]; if(url)l.push(`GEMINI_BASE_URL=${url}`); if(model)l.push(`GEMINI_MODEL=${model}`); return l.sort().join('\n')+'\n'; }
-function genOpenClawConfig(url, key, model) { return JSON.stringify({ provider: { base_url: url, api_key: key, model: model || undefined } }, null, 2); }
+function genOpenClawConfig(url, key, model) { const p = { base_url: url, api_key: key }; if (model) p.model = model; return JSON.stringify({ provider: p }, null, 2); }
 function genHermesConfig(url, key, model) { return `provider:\n  base_url: "${url}"\n  api_key: "${key}"\n${model ? `  model: "${model}"\n` : ''}`; }
 async function genConfig(db, ek, uid, app) { const p=await dbCurrent(db,uid,app); if(!p)return null; const k=await decrypt(p.api_key_encrypted,ek); switch(app){
   case'claude':return{fmt:'json',fn:'settings.json',content:genClaudeConfig(p.base_url,k,p.model,p.api_format,p.models_json),extra:null};
@@ -104,7 +104,7 @@ async function checkProv(db, ek, uid, pid) {
 async function streamTest(app, base, key, model, fmt) {
   const b = base.replace(/\/$/,''); let url, headers, body;
   if (app==='claude') { url=b+'/v1/messages'; headers={'Content-Type':'application/json','anthropic-version':'2023-06-01'}; if(key.startsWith('sk-ant-'))headers['x-api-key']=key; else{headers['Authorization']='Bearer '+key;headers['x-api-key']=key;} body=JSON.stringify({model:model||'claude-sonnet-4-20250514',max_tokens:1,stream:true,messages:[{role:'user',content:'Hi'}]}); }
-  else if (app==='codex') { url=b+'/v1/responses'; headers={'Content-Type':'application/json','Authorization':'Bearer '+key,'Accept':'text/event-stream'}; body=JSON.stringify({model:model||'gpt-4.1',stream:true,input:[{role:'user',content:'Hi'}]}); }
+  else if (app==='codex' || app==='openclaw' || app==='hermes') { url=b+'/v1/responses'; headers={'Content-Type':'application/json','Authorization':'Bearer '+key,'Accept':'text/event-stream'}; body=JSON.stringify({model:model||'gpt-4.1',stream:true,input:[{role:'user',content:'Hi'}]}); }
   else { const m=model||'gemini-2.0-flash'; url=b+`/v1beta/models/${m}:streamGenerateContent?alt=sse`; headers={'Content-Type':'application/json','x-goog-api-key':key}; body=JSON.stringify({contents:[{role:'user',parts:[{text:'Hi'}]}]}); }
   const ctrl=new AbortController(); const timer=setTimeout(()=>ctrl.abort(),15000); const start=performance.now();
   try { const r=await fetch(url,{method:'POST',headers,body,signal:ctrl.signal}); if(!r.ok){const t=await r.text().catch(()=>'');throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`);} const rd=r.body?.getReader(); if(!rd)throw new Error('No body'); const{done}=await rd.read(); const ms=Math.round(performance.now()-start); rd.cancel().catch(()=>{}); if(done)throw new Error('Empty'); return{ms}; } finally{clearTimeout(timer);}
@@ -198,7 +198,7 @@ function mainMenuMsg(name) {
   return {
     text: `🤖 *CC-Switch Bot*\n\n` +
       `欢迎${name ? ', *' + name + '*' : ''}！\n\n` +
-      `在 Telegram 里管理你所有服务器的\nClaude / Codex / Gemini 供应商配置。\n\n` +
+      `在 Telegram 里管理你所有服务器的\nClaude / Codex / Gemini / OpenClaw / Hermes 供应商配置。\n\n` +
       `👇 用下方键盘操作：`,
     parse_mode: 'Markdown',
     reply_markup: replyKb(),
@@ -236,8 +236,6 @@ async function fetchModels(baseUrl, apiKey, appType) {
   } catch { return []; }
 }
 
-// ========================== Fetch Models ==========================
-
 // ========================== Conversation Flow: Add Provider ==========================
 // States: add_app → add_name → add_url → add_key → add_confirm
 
@@ -251,8 +249,9 @@ async function handleAddCallback(env, uid, action, param) {
   if (!convo) return md('❌ 操作已过期，重新开始');
 
   if (action === 'addapp') {
-    await setConvo(env.DB, uid, 'add_name', { app: param, fmt: param === 'codex' ? 'openai_responses' : param === 'gemini' ? 'gemini_native' : 'anthropic' });
-    const icon = param === 'claude' ? '🟣' : param === 'codex' ? '🟢' : '🔵';
+    const fmtMap = { codex: 'openai_responses', gemini: 'gemini_native', openclaw: 'openai_responses', hermes: 'openai_responses' };
+    await setConvo(env.DB, uid, 'add_name', { app: param, fmt: fmtMap[param] || 'anthropic' });
+    const icon = APP_ICONS[param] || '⚪';
     return md(`➕ *添加供应商*\n\n${icon} *${param}*\n\n🔸 第 2/4 步：输入供应商名称\n\n_例: official, packy, relay_`, cancelKb());
   }
 
@@ -290,7 +289,7 @@ async function handleAddText(env, uid, text) {
 
 async function confirmAdd(env, uid, d) {
   await setConvo(env.DB, uid, 'add_confirm', d);
-  const icon = d.app === 'claude' ? '🟣' : d.app === 'codex' ? '🟢' : '🔵';
+  const icon = APP_ICONS[d.app] || '⚪';
   const modelsNote = d.models?.length > 0 ? `\n📦 已发现 *${d.models.length}* 个可用模型 (添加后可切换)` : '';
   return md(
     `➕ *确认添加*\n\n` +
@@ -319,7 +318,7 @@ async function executeAdd(env, uid) {
   let auto = '';
   if (!cur) { await dbSwitch(env.DB, uid, id); auto = '\n\n_已自动设为当前 ✅_'; }
 
-  const icon = d.app === 'claude' ? '🟣' : d.app === 'codex' ? '🟢' : '🔵';
+  const icon = APP_ICONS[d.app] || '⚪';
   const modelsHint = modelsJson ? `\n\n_进入详情页可 📥获取模型 或 🔀切换模型_` : '';
   return md(`✅ *供应商已添加！*${auto}\n\n${icon} *${d.name}*\n🆔 \`${id}\`\n🌐 \`${d.url}\`${modelsHint}`);
 }
@@ -335,7 +334,7 @@ async function showList(env, uid) {
 async function showProviderInfo(env, uid, id) {
   const p = await dbProvider(env.DB, uid, id);
   if (!p) return md('❌ 供应商不存在');
-  const icon = p.app_type === 'claude' ? '🟣' : p.app_type === 'codex' ? '🟢' : '🔵';
+  const icon = APP_ICONS[p.app_type] || '⚪';
   const cur = p.is_current ? '✅ *当前使用中*\n' : '';
   const models = p.models_json ? JSON.parse(p.models_json) : [];
   const modelsText = models.length > 0 ? `\n📦 可用模型: *${models.length}* 个` : '';
@@ -424,7 +423,7 @@ async function showModelPicker(env, uid, provId) {
   const p = await dbProvider(env.DB, uid, provId);
   if (!p) return md('❌ 供应商不存在');
   const models = p.models_json ? JSON.parse(p.models_json) : [];
-  if (models.length === 0) return md('📥 还没有模型列表，先点 *获取模型*', providerActionKb(provId, false));
+  if (models.length === 0) return md('📥 还没有模型列表，先点 *获取模型*', providerActionKb(provId, p.app_type, false));
 
   return md(
     `🔀 *${p.name} — 切换模型*\n\n当前: *${p.model || '默认'}*\n\n_点击要使用的模型_`,
@@ -442,7 +441,7 @@ async function handleSetModel(env, uid, provId, modelIdx) {
 
   await dbUpdateProvModel(env.DB, uid, provId, model);
 
-  const icon = p.app_type === 'claude' ? '🟣' : p.app_type === 'codex' ? '🟢' : '🔵';
+  const icon = APP_ICONS[p.app_type] || '⚪';
   return md(`✅ *模型已切换！*\n\n${icon} *${p.name}*\n🤖 → *${model}*\n\n_同步 Agent 将在下次拉取时生效_`);
 }
 
@@ -619,7 +618,7 @@ async function showSwitch(env, uid) {
   if (!ps.length) return md('🔄 *切换供应商*\n\n_还没有供应商_');
   const rows = [];
   for (const p of ps) {
-    const icon = p.app_type === 'claude' ? '🟣' : p.app_type === 'codex' ? '🟢' : '🔵';
+    const icon = APP_ICONS[p.app_type] || '⚪';
     const cur = p.is_current ? ' ✅' : '';
     rows.push([btn(`${icon} ${p.name}${cur}`, `switch:${p.id}`)]);
   }
@@ -629,18 +628,18 @@ async function showSwitch(env, uid) {
 async function doSwitch(env, uid, id) {
   const r = await dbSwitch(env.DB, uid, id);
   if (!r) return md('❌ 未找到');
-  const icon = r.app_type === 'claude' ? '🟣' : r.app_type === 'codex' ? '🟢' : '🔵';
+  const icon = APP_ICONS[r.app_type] || '⚪';
   return md(`✅ *已切换！*\n\n${icon} *${r.name}* [${r.app_type}]\n\n_所有同步 Agent 将在 1 分钟内自动更新_`);
 }
 
 async function showCurrent(env, uid) {
   let t = '✅ *当前活跃供应商*\n\n';
   let found = false;
-  for (const app of ['claude', 'codex', 'gemini']) {
+  for (const app of ALL_APPS) {
     const p = await dbCurrent(env.DB, uid, app);
     if (p) {
       found = true;
-      const icon = app === 'claude' ? '🟣' : app === 'codex' ? '🟢' : '🔵';
+      const icon = APP_ICONS[app] || '⚪';
       t += `${icon} *${app}*: ${p.name}\n   \`${p.base_url}\`\n   模型: ${p.model || '默认'}\n\n`;
     }
   }
@@ -658,7 +657,7 @@ async function showTest(env, uid, specificId) {
     return md(t);
   }
   let t = '🔍 *连通性测试*\n\n'; let tested = false;
-  for (const app of ['claude', 'codex', 'gemini']) {
+  for (const app of ALL_APPS) {
     const cur = await dbCurrent(env.DB, uid, app);
     if (cur) {
       tested = true;
@@ -854,8 +853,8 @@ for cmd in curl crontab mktemp; do command -v "\$cmd" &>/dev/null || { err "缺�
 if [ -z "\${CC_SWITCH_BOT_TOKEN:-}" ]; then echo -e "\${BOLD}请输入 API Token\${NC} (Bot 中发 /start 获取)"; read -rp "Token: " CC_SWITCH_BOT_TOKEN < /dev/tty; echo ""; fi
 [ -z "\$CC_SWITCH_BOT_TOKEN" ] && { err "Token 为空"; exit 1; }
 info "验证 Token..."; curl -sf -H "Authorization: Bearer \${CC_SWITCH_BOT_TOKEN}" "\${API_BASE}/api/providers" >/dev/null || { err "验证失败"; exit 1; }; ok "验证通过"
-if [ -z "\${CC_SWITCH_BOT_APPS:-}" ]; then echo "同步哪些应用? (空格分隔, 默认 claude)"; echo "  可选: claude codex gemini"; read -rp "[claude]: " CC_SWITCH_BOT_APPS < /dev/tty; CC_SWITCH_BOT_APPS="\${CC_SWITCH_BOT_APPS:-claude}"; fi
-for a in \$CC_SWITCH_BOT_APPS; do case "\$a" in claude) mkdir -p ~/.claude;; codex) mkdir -p "\${CODEX_HOME:-~/.codex}";; gemini) mkdir -p ~/.gemini;; esac; done
+if [ -z "\${CC_SWITCH_BOT_APPS:-}" ]; then echo "同步哪些应用? (空格分隔, 默认 claude)"; echo "  可选: claude codex gemini openclaw hermes"; read -rp "[claude]: " CC_SWITCH_BOT_APPS < /dev/tty; CC_SWITCH_BOT_APPS="\${CC_SWITCH_BOT_APPS:-claude}"; fi
+for a in \$CC_SWITCH_BOT_APPS; do case "\$a" in claude) mkdir -p ~/.claude;; codex) mkdir -p "\${CODEX_HOME:-~/.codex}";; gemini) mkdir -p ~/.gemini;; openclaw) mkdir -p ~/.openclaw;; hermes) mkdir -p ~/.hermes;; esac; done
 mkdir -p "\$INSTALL_DIR"
 cat > "\$ENV_FILE" <<EOF
 CC_SWITCH_BOT_API=\${API_BASE}
