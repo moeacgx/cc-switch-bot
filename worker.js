@@ -426,10 +426,10 @@ API_BASE="${origin}"
 INSTALL_DIR="\${HOME}/.cc-switch-bot"; SYNC_SCRIPT="\${INSTALL_DIR}/sync.sh"; ENV_FILE="\${INSTALL_DIR}/.env"; LOG_FILE="\${INSTALL_DIR}/sync.log"
 echo ""; echo -e "\${BOLD}╔═══════════════════════════════════════════╗\${NC}"; echo -e "\${BOLD}║  CC-Switch Bot — 一键安装同步 Agent       ║\${NC}"; echo -e "\${BOLD}╚═══════════════════════════════════════════╝\${NC}"; echo ""
 for cmd in curl crontab mktemp; do command -v "\$cmd" &>/dev/null || { err "缺少 \$cmd"; exit 1; }; done; ok "依赖检查通过"
-if [ -z "\${CC_SWITCH_BOT_TOKEN:-}" ]; then echo -e "\${BOLD}请输入 API Token\${NC} (Bot 中发 /start 获取)"; read -rp "Token: " CC_SWITCH_BOT_TOKEN; echo ""; fi
+if [ -z "\${CC_SWITCH_BOT_TOKEN:-}" ]; then echo -e "\${BOLD}请输入 API Token\${NC} (Bot 中发 /start 获取)"; read -rp "Token: " CC_SWITCH_BOT_TOKEN < /dev/tty; echo ""; fi
 [ -z "\$CC_SWITCH_BOT_TOKEN" ] && { err "Token 为空"; exit 1; }
 info "验证 Token..."; curl -sf -H "Authorization: Bearer \${CC_SWITCH_BOT_TOKEN}" "\${API_BASE}/api/providers" >/dev/null || { err "验证失败"; exit 1; }; ok "验证通过"
-if [ -z "\${CC_SWITCH_BOT_APPS:-}" ]; then echo "同步哪些应用? (空格分隔, 默认 claude)"; echo "  可选: claude codex gemini"; read -rp "[claude]: " CC_SWITCH_BOT_APPS; CC_SWITCH_BOT_APPS="\${CC_SWITCH_BOT_APPS:-claude}"; fi
+if [ -z "\${CC_SWITCH_BOT_APPS:-}" ]; then echo "同步哪些应用? (空格分隔, 默认 claude)"; echo "  可选: claude codex gemini"; read -rp "[claude]: " CC_SWITCH_BOT_APPS < /dev/tty; CC_SWITCH_BOT_APPS="\${CC_SWITCH_BOT_APPS:-claude}"; fi
 for a in \$CC_SWITCH_BOT_APPS; do case "\$a" in claude) mkdir -p ~/.claude;; codex) mkdir -p "\${CODEX_HOME:-~/.codex}";; gemini) mkdir -p ~/.gemini;; esac; done
 mkdir -p "\$INSTALL_DIR"
 cat > "\$ENV_FILE" <<EOF
